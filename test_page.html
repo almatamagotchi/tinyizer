@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Page</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        /* Main layout */
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #ffffff;
+        }
+
+        .header {
+            background-color: #333333;
+            color: #ffffff;
+            padding-top: 20px;
+            padding-right: 20px;
+            padding-bottom: 20px;
+            padding-left: 20px;
+        }
+
+        #main-title {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin-top: 0;
+            margin-right: auto;
+            margin-bottom: 0;
+            margin-left: auto;
+            padding-top: 16px;
+            padding-right: 16px;
+            padding-bottom: 16px;
+            padding-left: 16px;
+        }
+
+        .unused-class {
+            display: none;
+            color: red;
+        }
+
+        .card {
+            border-width: 1px;
+            border-style: solid;
+            border-color: #cccccc;
+            border-radius: 4px;
+            margin-bottom: 16px;
+            padding: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1 id="main-title">Welcome to Tinyizer</h1>
+    </div>
+    <div class="container">
+        <div class="card">
+            <h2>Card 1</h2>
+            <p>This is a test card with some content.</p>
+        </div>
+        <div class="card">
+            <h2>Card 2</h2>
+            <p>Another card for testing.</p>
+        </div>
+    </div>
+    <script>
+        // Simple greeting
+        var visitorName = "World";
+        function greetUser(name) {
+            var message = "Hello, " + name + "!";
+            document.getElementById("main-title").textContent = message;
+        }
+        var result = greetUser(visitorName);
+        console.log("Page loaded");
+
+        // Unused function
+        function unusedHelper() {
+            return "nobody calls me";
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+build/
+build2/
+*.o
+*.out
+.DS_Store
+*.min.html
+*.min.css
+*.min.js

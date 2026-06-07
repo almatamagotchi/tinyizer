@@ -1,0 +1,4 @@
+body { color: red; background-color: #ffffff; margin-top: 0; margin-right: auto; margin-bottom: 0; margin-left: auto; }
+.unused { display: none; color: blue; }
+.header { padding-top: 10px; padding-right: 20px; padding-bottom: 10px; padding-left: 20px; background-color: #ff0000; }
+#main-title { font-weight: bold; }
