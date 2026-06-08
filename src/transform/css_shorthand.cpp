@@ -35,6 +35,13 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"animation",    {"animation-name", "animation-duration", "animation-timing-function",
                       "animation-delay", "animation-iteration-count", "animation-direction",
                       "animation-fill-mode", "animation-play-state"}},
+    {"gap",          {"row-gap", "column-gap"}},
+    {"flex-flow",    {"flex-direction", "flex-wrap"}},
+    {"columns",      {"column-width", "column-count"}},
+    {"inset",        {"top", "right", "bottom", "left"}},
+    {"place-content", {"align-content", "justify-content"}},
+    {"place-items",   {"align-items", "justify-items"}},
+    {"place-self",    {"align-self", "justify-self"}},
 };
 
 // CSS value minification helpers
@@ -313,6 +320,29 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"border-width", "border"},
         {"border-style", "border"},
         {"border-color", "border"},
+        {"outline-width", "outline"},
+        {"outline-style", "outline"},
+        {"outline-color", "outline"},
+        {"row-gap", "gap"},
+        {"column-gap", "gap"},
+        {"flex-direction", "flex-flow"},
+        {"flex-wrap", "flex-flow"},
+        {"column-width", "columns"},
+        {"column-count", "columns"},
+        {"top", "inset"},
+        {"right", "inset"},
+        {"bottom", "inset"},
+        {"left", "inset"},
+        {"align-content", "place-content"},
+        {"justify-content", "place-content"},
+        {"align-items", "place-items"},
+        {"justify-items", "place-items"},
+        {"align-self", "place-self"},
+        {"justify-self", "place-self"},
+        {"transition-property", "transition"},
+        {"transition-duration", "transition"},
+        {"transition-timing-function", "transition"},
+        {"transition-delay", "transition"},
     };
 
     for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {

@@ -95,6 +95,28 @@ int main() {
                 padding-bottom: 5px;
                 padding-left: 5px;
             }
+            .grid {
+                row-gap: 1em;
+                column-gap: 2em;
+            }
+            .flex {
+                flex-direction: column;
+                flex-wrap: wrap;
+            }
+            .cols {
+                column-width: 200px;
+                column-count: 3;
+            }
+            .pos {
+                top: 0;
+                right: 0;
+                bottom: 0;
+                left: 0;
+            }
+            .place {
+                align-content: center;
+                justify-content: space-between;
+            }
         )";
 
         auto rules = css_parser.parse(css);
