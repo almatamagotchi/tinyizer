@@ -204,6 +204,17 @@ static void safe_rename_identifier(std::string& js, const std::string& old_name,
 // Walk AST tree and collect (src_start, src_end) ranges for FUNC_DECL/VAR_DECL
 // nodes whose declared name matches an entry in dead_names.
 // Uses opt_js text to read names (AST value string_views may dangle).
+// Check if a subtree contains a call or new expression (side-effecting).
+static bool has_call_side_effect(JSNode* node) {
+    if (!node) return false;
+    if (node->type == JSNodeType::CALL_EXPR || node->type == JSNodeType::NEW_EXPR)
+        return true;
+    for (const auto& child : node->children) {
+        if (has_call_side_effect(child.get())) return true;
+    }
+    return false;
+}
+
 static void collect_dead_node_ranges(JSNode* node,
                                       const std::unordered_set<std::string>& dead_names,
                                       const std::string& opt_js,
@@ -239,7 +250,27 @@ static void collect_dead_node_ranges(JSNode* node,
                 std::string name = opt_js.substr(child->src_start,
                                                  child->src_end - child->src_start);
                 if (dead_names.count(name)) {
-                    ranges.emplace_back(node->src_start, node->src_end);
+                    // Check if the initializer has side effects (calls/new).
+                    // e.g., var x = greetUser(name); — the call must survive.
+                    JSNode* side_init = nullptr;
+                    for (size_t ci = 0; ci < node->children.size(); ci++) {
+                        if (node->children[ci]->type == JSNodeType::IDENTIFIER &&
+                            node->children[ci]->is_declaration) continue;
+                        if (has_call_side_effect(node->children[ci].get())) {
+                            side_init = node->children[ci].get();
+                            break;
+                        }
+                    }
+                    if (side_init) {
+                        // Extract the call: remove only the "var x =" prefix,
+                        // leaving the call expression as a standalone statement.
+                        // e.g., var result = greetUser(name);  →  greetUser(name);
+                        if (side_init->src_start > node->src_start) {
+                            ranges.emplace_back(node->src_start, side_init->src_start);
+                        }
+                    } else {
+                        ranges.emplace_back(node->src_start, node->src_end);
+                    }
                     break;
                 }
             }
@@ -312,6 +343,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
             changed_this_iteration = true;
 
         if (config_.enable_css_shorthand && pass_css_shorthand(doc))
+            changed_this_iteration = true;
+
+        if (config_.enable_css_shorthand && pass_css_value_fold(doc))
             changed_this_iteration = true;
 
         if (config_.enable_js_constant_fold && pass_js_constant_fold(doc))
@@ -419,8 +453,11 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         scan_string_ranges_in_text(opt_js, string_ranges);
 
         // --- Apply JS name renames, skipping string/template literals ---
+        // Recalculate string_ranges after each rename since positions shift
         for (auto& [old_name_sv, new_name] : doc.js_rename_map) {
             std::string old_name(old_name_sv);
+            string_ranges.clear();
+            scan_string_ranges_in_text(opt_js, string_ranges);
             safe_rename_identifier(opt_js, old_name, new_name,
                                    string_ranges.empty() ? nullptr : &string_ranges);
         }

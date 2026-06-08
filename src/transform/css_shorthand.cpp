@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <unordered_map>
+#include <unordered_set>
 
 // CSS shorthand property merging and value minification
 namespace tinyizer {
@@ -483,6 +484,89 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     }
                 }
 
+                changed = true;
+            }
+        }
+    }
+
+    return changed;
+}
+
+// Box-model value folding: collapse redundant space-separated values.
+// Applies to properties that take 1-4 values in top/right/bottom/left order.
+// e.g., margin: 0 0 0 0  →  margin: 0
+//       padding: 1px 2px 1px 2px  →  padding: 1px 2px
+//       border-radius: 10px 10px  →  border-radius: 10px
+bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
+    bool changed = false;
+
+    // Properties that use the CSS box-model value syntax (1-4 space-separated values)
+    static const std::unordered_set<std::string_view> BOX_MODEL_PROPS = {
+        "margin", "padding",
+        "border-width", "border-style", "border-color",
+        "margin-inline", "margin-block", "padding-inline", "padding-block",
+        "outline-width", "outline-style", "outline-color",
+        "border-radius", "inset", "gap", "grid-gap",
+    };
+
+    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+        auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
+        for (auto& decl : decls) {
+            if (BOX_MODEL_PROPS.find(decl.property) == BOX_MODEL_PROPS.end()) continue;
+
+            std::string_view val = decl.value;
+            if (val.empty()) continue;
+
+            // Tokenize: split on whitespace, but bail on complex values
+            std::vector<std::string_view> tokens;
+            size_t pos = 0;
+            while (pos < val.size()) {
+                while (pos < val.size() && is_whitespace(val[pos])) pos++;
+                if (pos >= val.size()) break;
+
+                // Bail on '/' (border-radius splits radii) or '(' (function calls)
+                if (val[pos] == '/' || val[pos] == '(') { tokens.clear(); break; }
+
+                size_t start = pos;
+                while (pos < val.size() && !is_whitespace(val[pos]) && val[pos] != ',' && val[pos] != '/') pos++;
+                tokens.push_back(val.substr(start, pos - start));
+
+                while (pos < val.size() && is_whitespace(val[pos])) pos++;
+                if (pos < val.size() && (val[pos] == ',' || val[pos] == '/')) {
+                    tokens.clear();
+                    break;
+                }
+            }
+
+            if (tokens.size() < 2 || tokens.size() > 4) continue;
+
+            std::string folded;
+            switch (tokens.size()) {
+                case 4:
+                    if (tokens[0] == tokens[1] && tokens[1] == tokens[2] && tokens[2] == tokens[3]) {
+                        folded = std::string(tokens[0]);
+                    } else if (tokens[0] == tokens[2] && tokens[1] == tokens[3]) {
+                        folded = std::string(tokens[0]) + " " + std::string(tokens[1]);
+                    } else if (tokens[1] == tokens[3]) {
+                        folded = std::string(tokens[0]) + " " + std::string(tokens[1]) + " " + std::string(tokens[2]);
+                    }
+                    break;
+                case 3:
+                    if (tokens[0] == tokens[1] && tokens[1] == tokens[2]) {
+                        folded = std::string(tokens[0]);
+                    } else if (tokens[0] == tokens[2]) {
+                        folded = std::string(tokens[0]) + " " + std::string(tokens[1]);
+                    }
+                    break;
+                case 2:
+                    if (tokens[0] == tokens[1]) {
+                        folded = std::string(tokens[0]);
+                    }
+                    break;
+            }
+
+            if (!folded.empty()) {
+                decl.value = doc.string_pool().intern(folded);
                 changed = true;
             }
         }
