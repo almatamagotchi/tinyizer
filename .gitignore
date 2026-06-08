@@ -6,3 +6,4 @@ build2/
 *.min.html
 *.min.css
 *.min.js
+.nanobot-lock
