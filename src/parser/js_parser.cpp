@@ -18,6 +18,10 @@ static const std::unordered_set<std::string_view> JS_KEYWORDS = {
 
 // Operator precedence (higher = binds tighter)
 static int op_precedence(std::string_view op) {
+    if (op == "=" || op == "+=" || op == "-=" || op == "*=" || op == "/=" ||
+        op == "%=" || op == "&=" || op == "|=" || op == "^=" || op == "&&=" ||
+        op == "||=" || op == "??=" || op == "<<=" || op == ">>=" || op == ">>>=" ||
+        op == "**=") return 0;
     if (op == "||" || op == "??") return 1;
     if (op == "&&") return 2;
     if (op == "|") return 3;
@@ -529,32 +533,52 @@ std::unique_ptr<JSNode> JSParser::parse_expression(int precedence) {
 
         char c = tok_->peek();
 
-        // Binary operators
+        // Detect operator (binary or assignment)
         std::string_view op;
-        if (c == '+' || c == '-' || c == '*' || c == '/' || c == '%' || c == '^' || c == '&' || c == '|') {
+        bool is_assignment = false;
+
+        // 3-char operators
+        if (tok_->peek_match("===") || tok_->peek_match("!==") || tok_->peek_match(">>=") ||
+            tok_->peek_match("<<=") || tok_->peek_match(">>>") || tok_->peek_match("**")) {
+            op = tok_->substr(tok_->pos(), tok_->pos() + 3);
+            is_assignment = (op == ">>=" || op == "<<=");
+        }
+        // 2-char comparison / binary operators
+        else if (tok_->peek_match("==") || tok_->peek_match("!=") || tok_->peek_match("<=") ||
+                 tok_->peek_match(">=") || tok_->peek_match("<<") || tok_->peek_match(">>") ||
+                 tok_->peek_match("&&") || tok_->peek_match("||") || tok_->peek_match("??")) {
+            op = tok_->substr(tok_->pos(), tok_->pos() + 2);
+            is_assignment = false;
+        }
+        // 2-char assignment operators
+        else if (tok_->peek_match("+=") || tok_->peek_match("-=") || tok_->peek_match("*=") ||
+                 tok_->peek_match("/=") || tok_->peek_match("%=") || tok_->peek_match("&=") ||
+                 tok_->peek_match("|=") || tok_->peek_match("^=") || tok_->peek_match("&&=") ||
+                 tok_->peek_match("||=") || tok_->peek_match("??=") || tok_->peek_match("**=")) {
+            op = tok_->substr(tok_->pos(), tok_->pos() + 2);
+            is_assignment = true;
+        }
+        // single-char operators
+        else if (c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
+                 c == '^' || c == '&' || c == '|' || c == '=') {
             op = tok_->substr(tok_->pos(), tok_->pos() + 1);
-        } else if (tok_->peek_match("**") || tok_->peek_match("<<" )|| tok_->peek_match(">>") ||
-                   tok_->peek_match("===") || tok_->peek_match("==") || tok_->peek_match("!==") ||
-                   tok_->peek_match("!=") || tok_->peek_match("<=") || tok_->peek_match(">=") ||
-                   tok_->peek_match("&&") || tok_->peek_match("||") || tok_->peek_match("??")) {
-            if (tok_->peek_match("===") || tok_->peek_match("!==") || tok_->peek_match("**")) {
-                op = tok_->substr(tok_->pos(), tok_->pos() + 3);
-            } else {
-                op = tok_->substr(tok_->pos(), tok_->pos() + 2);
-            }
+            is_assignment = (c == '=');
         }
 
         if (!op.empty()) {
             int prec = precedence_of(op);
-            if (prec < 0 || prec <= precedence) break;
+            if (prec < 0) break;
+            // Right-associative for assignment: a = b = c → a = (b = c)
+            if (is_assignment ? prec < precedence : prec <= precedence) break;
 
             tok_->skip(op.size());
             skip_comments_and_whitespace();
             auto right = parse_expression(prec);
-            auto binary = std::make_unique<JSNode>(JSNodeType::BINARY_EXPR, op);
-            binary->children.push_back(std::move(left));
-            if (right) binary->children.push_back(std::move(right));
-            left = std::move(binary);
+            auto node = std::make_unique<JSNode>(
+                is_assignment ? JSNodeType::ASSIGN_EXPR : JSNodeType::BINARY_EXPR, op);
+            node->children.push_back(std::move(left));
+            if (right) node->children.push_back(std::move(right));
+            left = std::move(node);
         } else if (c == '?' || c == '.') {
             break; // handled in primary/member
         } else {
@@ -712,6 +736,13 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
                     tok_->advance(); // (
                     parse_call_arguments(call);
                     maybe_track_dom_access(call);
+                    // After call, check for further chaining (e.g., .foo afterwards)
+                    skip_comments_and_whitespace();
+                    if (tok_->peek() == '.') {
+                        member = std::make_unique<JSNode>(JSNodeType::MEMBER_EXPR);
+                        member->children.push_back(std::move(call));
+                        continue;
+                    }
                     return stamp_node(std::move(call), member_start);
                 }
             }

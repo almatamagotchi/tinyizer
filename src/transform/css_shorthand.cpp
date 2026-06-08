@@ -49,6 +49,7 @@ std::string minify_css_value(const std::string& value) {
         {"a52a2a","brown"},{"fa8072","salmon"},{"a0522d","sienna"},{"4b0082","indigo"},
         {"ee82ee","violet"},{"da70d6","orchid"},{"ff6347","tomato"},{"ffa500","orange"},
         {"800080","purple"},{"800000","maroon"},
+        {"f0ffff","azure"},{"ffe4c4","bisque"},{"c0c0c0","silver"},
     };
 
     std::string result;

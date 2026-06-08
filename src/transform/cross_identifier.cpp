@@ -22,6 +22,7 @@ namespace tinyizer {
 bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     FrequencyMap<std::string_view> freq_map;
     std::unordered_map<std::string_view, std::string> rename_map;
+    std::unordered_set<std::string_view> doc_html_css_names; // names that appear in HTML/CSS
 
     // ---- Collect from HTML ----
     if (doc.root()) {
@@ -31,6 +32,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
             for (const auto& attr : node.attrs()) {
                 if (attr.name == std::string_view("id")) {
                     freq_map.record(attr.value);
+                    doc_html_css_names.insert(attr.value);
                 } else if (attr.name == std::string_view("class")) {
                     // Split class attribute by whitespace
                     std::string_view val = attr.value;
@@ -42,7 +44,10 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                         while (end < val.size() && !is_whitespace(val[end])) end++;
                         if (end > pos) {
                             std::string_view cls = val.substr(pos, end - pos);
-                            if (!cls.empty()) freq_map.record(cls);
+                            if (!cls.empty()) {
+                                freq_map.record(cls);
+                                doc_html_css_names.insert(cls);
+                            }
                         }
                         pos = end;
                     }
@@ -51,6 +56,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                 if (attr.name.size() > 5 &&
                     attr.name.substr(0, 5) == std::string_view("data-")) {
                     freq_map.record(attr.name);
+                    doc_html_css_names.insert(attr.name);
                 }
             }
         });
@@ -60,17 +66,24 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     for (const auto& rule : doc.stylesheets()) {
         // Classes
         for (auto cls : rule.referenced_classes()) {
-            if (!cls.empty()) freq_map.record(cls);
+            if (!cls.empty()) {
+                freq_map.record(cls);
+                doc_html_css_names.insert(cls);
+            }
         }
         // IDs
         for (auto id : rule.referenced_ids()) {
-            if (!id.empty()) freq_map.record(id);
+            if (!id.empty()) {
+                freq_map.record(id);
+                doc_html_css_names.insert(id);
+            }
         }
         // Custom properties
         for (const auto& decl : rule.declarations()) {
             if (decl.property.size() >= 2 &&
                 decl.property[0] == '-' && decl.property[1] == '-') {
                 freq_map.record(decl.property);
+                doc_html_css_names.insert(decl.property);
             }
         }
     }
@@ -113,34 +126,47 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     if (freq_map.size() < 2) return false;
 
     // ---- Build rename map ----
-    // Reserve certain names: standard HTML elements, CSS properties, JS keywords/builtins
-    static const std::unordered_set<std::string_view> RESERVED = {
-        "html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li",
-        "table", "tr", "td", "th", "form", "input", "button", "select", "option",
-        "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "nav", "header",
-        "footer", "main", "aside", "style", "script", "link", "meta", "title",
-        "class", "id", "style", "href", "src", "alt", "type", "name", "value",
-        "width", "height", "color", "margin", "padding", "border", "display",
-        "position", "top", "left", "right", "bottom", "font", "size", "text",
-        "background", "width", "height", "min-width", "max-width", "overflow",
-        "document", "window", "console", "Math", "Array", "Object", "String",
-        "Number", "Boolean", "Function", "Promise", "JSON", "Error", "Map", "Set",
-        "parseInt", "parseFloat", "isNaN", "undefined", "null", "true", "false",
-        "var", "let", "const", "function", "return", "if", "else", "for", "while",
-        "break", "continue", "switch", "case", "default", "try", "catch", "throw",
-        "new", "this", "typeof", "instanceof", "in", "of", "class", "extends",
-        "import", "export", "async", "await", "yield", "delete", "void",
-    };
+    // Two-tier safety: JS keywords/builtins are never renamed.
+    // HTML element/attribute names are only skipped if they actually appear
+    // in this document's markup — a JS-only variable like 'name' is fair game.
 
     auto by_freq = freq_map.sorted();
     size_t rank = 0;
     for (const auto& [name, freq] : by_freq) {
-        if (RESERVED.count(name) > 0) continue;
+        // Always skip JS keywords and builtins — these are never safe to rename
+        static const std::unordered_set<std::string_view> JS_UNSAFE = {
+            "document", "window", "console", "Math", "Array", "Object", "String",
+            "Number", "Boolean", "Function", "Promise", "JSON", "Error", "Map", "Set",
+            "parseInt", "parseFloat", "isNaN", "undefined", "null", "true", "false",
+            "var", "let", "const", "function", "return", "if", "else", "for", "while",
+            "break", "continue", "switch", "case", "default", "try", "catch", "throw",
+            "new", "this", "typeof", "instanceof", "in", "of", "class", "extends",
+            "import", "export", "async", "await", "yield", "delete", "void",
+        };
+        if (JS_UNSAFE.count(name) > 0) continue;
+
+        // Skip HTML/CSS names that appear in the document: renaming a CSS class
+        // or HTML id that's actively used would break selectors and DOM lookups.
+        // But a JS-only variable that happens to share a reserved HTML attribute name
+        // (like 'name', 'value', 'title') is safe to rename since it doesn't appear
+        // in this document's markup.
+        static const std::unordered_set<std::string_view> HTML_RESERVED = {
+            "html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li",
+            "table", "tr", "td", "th", "form", "input", "button", "select", "option",
+            "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "nav", "header",
+            "footer", "main", "aside", "style", "script", "link", "meta", "title",
+            "class", "id", "style", "href", "src", "alt", "type", "name", "value",
+            "width", "height", "color", "margin", "padding", "border", "display",
+            "position", "top", "left", "right", "bottom", "font", "size", "text",
+            "background", "width", "height", "min-width", "max-width", "overflow",
+        };
+        if (HTML_RESERVED.count(name) > 0 && doc_html_css_names.count(name) > 0) continue;
+
         if (name.size() <= 1) continue; // already minimal
         std::string short_name;
         do {
             short_name = FrequencyMap<std::string_view>::name_for_rank(rank++);
-        } while (RESERVED.count(short_name) > 0);
+        } while (JS_UNSAFE.count(short_name) > 0 || HTML_RESERVED.count(short_name) > 0);
         rename_map[name] = short_name;
     }
 

@@ -13,8 +13,8 @@ Built by [Alma Tamagotchi](https://github.com/almatamagotchi) with algorithmic d
 
 | Test page | Input | Output | Reduction | Time |
 |-----------|------:|-------:|----------:|-----:|
-| test_page.html | 2,153 | 785 | 63.5% | 5ms |
-| test_page2.html | 521 | 279 | 46.4% | 4ms |
+| test_page.html | 2,153 | 777 | 63.9% | 5ms |
+| test_page2.html | 521 | 272 | 47.8% | 4ms |
 | test_page3.html | 381 | 191 | 49.9% | 6ms |
 
 ## Design
@@ -75,7 +75,7 @@ These tools produce a complete, browser-ready HTML page — CSS, JS, and structu
 
 | Tool | test_page.html | test_page2.html | test_page3.html |
 |------|:---:|:---:|:---:|
-| **tinyizer** | **785** | **279** | **191** |
+| **tinyizer** | **777** | **272** | **191** |
 | Pipeline¹ | 839 | 291 | 251 |
 | html-minifier-terser | 1,178 | 370 | 276 |
 | cminify | 1,263 | 433 | 328 |
