@@ -93,6 +93,22 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         collect_scope(doc.js_root_scope());
     }
 
+    // ---- Remove JS-touched classes from rename candidates ----
+    // Classes detected in JS string literals (classList.add("foo"), etc.)
+    // must NOT be renamed because we can't reliably rewrite those string literals.
+    // Renaming the CSS selector but leaving the JS string unchanged would break
+    // the class match at runtime.
+    for (const auto& js_cls : doc.js_touched_classes) {
+        freq_map.remove(js_cls);
+    }
+
+    // ---- Remove JS-touched IDs from rename candidates ----
+    // Same reasoning: IDs used in getElementById("foo") or querySelector("#bar")
+    // must not be renamed because the JS string literal won't be updated.
+    for (const auto& js_id : doc.js_touched_ids) {
+        freq_map.remove(js_id);
+    }
+
     // ---- Check if we have enough identifiers to squeeze ----
     if (freq_map.size() < 2) return false;
 
@@ -129,6 +145,20 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     }
 
     if (rename_map.empty()) return false;
+
+    // ---- Update cumulative rename map (original → current short name) ----
+    for (const auto& [old_name, new_name] : rename_map) {
+        std::string old_str(old_name);
+        // Check if this old name was itself a previous rename target
+        std::string original = old_str;
+        for (const auto& [orig, prev_curr] : doc.cumulative_rename) {
+            if (prev_curr == old_str) {
+                original = orig;
+                break;
+            }
+        }
+        doc.cumulative_rename[original] = new_name;
+    }
 
     // ---- Store rename map for use during serialization ----
     doc.css_rename_map = rename_map;

@@ -51,6 +51,7 @@ public:
 
     // Variables map access (for iteration in cross-identifier pass)
     const std::unordered_map<std::string, Variable>& variables() const { return variables_; }
+    const std::unordered_map<std::string, FunctionInfo>& functions() const { return functions_; }
 
     JSScope* add_child(std::unique_ptr<JSScope> child);
 

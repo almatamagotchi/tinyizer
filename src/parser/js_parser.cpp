@@ -60,7 +60,7 @@ std::unique_ptr<JSNode> JSParser::parse(std::string_view js, JSScope* root_scope
         }
     }
 
-    return program;
+    return stamp_node(std::move(program), 0);
 }
 
 void JSParser::skip_comments_and_whitespace() {
@@ -210,6 +210,7 @@ std::unique_ptr<JSNode> JSParser::parse_statement() {
 }
 
 std::unique_ptr<JSNode> JSParser::parse_block() {
+    size_t start = tok_->pos();
     tok_->match('{');
     auto block = std::make_unique<JSNode>(JSNodeType::BLOCK_STMT);
 
@@ -229,10 +230,11 @@ std::unique_ptr<JSNode> JSParser::parse_block() {
     exit_scope();
 
     tok_->match('}');
-    return block;
+    return stamp_node(std::move(block), start);
 }
 
 std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
+    size_t start = tok_->pos();
     std::string_view keyword = tok_->read_identifier(); // var, let, const
     auto decl = std::make_unique<JSNode>(JSNodeType::VAR_DECL);
     decl->value = keyword;
@@ -255,10 +257,11 @@ std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
             while (!tok_->eof()) { if (tok_->peek() == '{') depth++; else if (tok_->peek() == '}') { depth--; if (depth == 0) { tok_->advance(); break; } } tok_->advance(); }
         } else {
             // Simple identifier
+            size_t id_start = tok_->pos();
             std::string_view name = tok_->read_identifier();
             auto id = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, name);
             id->is_declaration = true;
-            decl->children.push_back(std::move(id));
+            decl->children.push_back(stamp_node(std::move(id), id_start));
 
             if (scope_) scope_->declare_variable(name);
         }
@@ -283,10 +286,11 @@ std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
     }
 
     tok_->match(';');
-    return decl;
+    return stamp_node(std::move(decl), start);
 }
 
 std::unique_ptr<JSNode> JSParser::parse_function_declaration() {
+    size_t start = tok_->pos();
     tok_->skip(8); // "function"
     skip_comments_and_whitespace();
 
@@ -335,10 +339,10 @@ std::unique_ptr<JSNode> JSParser::parse_function_declaration() {
 
     exit_scope();
 
-    return func;
+    return stamp_node(std::move(func), start);
 }
 
-std::unique_ptr<JSNode> JSParser::parse_function_expression(bool is_arrow) {
+std::unique_ptr<JSNode> JSParser::parse_function_expression(bool is_arrow, size_t start) {
     std::vector<std::string_view> params;
 
     if (!is_arrow) {
@@ -387,7 +391,7 @@ std::unique_ptr<JSNode> JSParser::parse_function_expression(bool is_arrow) {
 
     auto func = std::make_unique<JSNode>(JSNodeType::FUNC_EXPR);
     if (body) func->children.push_back(std::move(body));
-    return func;
+    return stamp_node(std::move(func), start);
 }
 
 std::unique_ptr<JSNode> JSParser::parse_return_statement() {
@@ -561,6 +565,35 @@ std::unique_ptr<JSNode> JSParser::parse_expression(int precedence) {
     return left;
 }
 
+// Parse comma-separated arguments in parentheses.
+// Precondition: '(' has already been consumed.
+// Parses each argument as a full expression, tracking references.
+void JSParser::parse_call_arguments(std::unique_ptr<JSNode>& call) {
+    int depth = 1;
+    while (!tok_->eof() && depth > 0) {
+        skip_comments_and_whitespace();
+        if (tok_->peek() == ')') {
+            tok_->advance();
+            depth--;
+            if (depth == 0) break;
+            continue;
+        }
+        if (tok_->peek() == ',' && depth == 1) {
+            tok_->advance();
+            continue;
+        }
+
+        // Parse one argument expression
+        auto arg = parse_expression();
+        if (arg) {
+            call->children.push_back(std::move(arg));
+        }
+
+        // If next char is ',', we'll handle it at top of loop
+        // If next char is ')', it's the last arg — loop handles it
+    }
+}
+
 std::unique_ptr<JSNode> JSParser::parse_primary() {
     skip_comments_and_whitespace();
     if (tok_->eof()) return nullptr;
@@ -569,18 +602,21 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
 
     // Literals
     if (is_digit(c) || (c == '.' && is_digit(tok_->peek_ahead(1)))) {
+        size_t start = tok_->pos();
         std::string_view num = tok_->read_number();
-        return std::make_unique<JSNode>(JSNodeType::LITERAL, num);
+        return stamp_node(std::make_unique<JSNode>(JSNodeType::LITERAL, num), start);
     }
 
     if (c == '"' || c == '\'') {
+        size_t start = tok_->pos();
         std::string str = tok_->read_quoted(c);
         // Store as literal
         auto lit = std::make_unique<JSNode>(JSNodeType::LITERAL, tok_->substr(tok_->pos() - str.size() - 2, tok_->pos()));
-        return lit;
+        return stamp_node(std::move(lit), start);
     }
 
     if (c == '`') {
+        size_t tl_start = tok_->pos();
         // Template literal — consume until closing `
         tok_->advance();
         while (!tok_->eof() && tok_->peek() != '`') {
@@ -598,7 +634,7 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
             tok_->advance();
         }
         tok_->match('`');
-        return std::make_unique<JSNode>(JSNodeType::TEMPLATE_LITERAL);
+        return stamp_node(std::make_unique<JSNode>(JSNodeType::TEMPLATE_LITERAL), tl_start);
     }
 
     // Keywords: true, false, null, undefined, this, new
@@ -606,88 +642,80 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
         std::string_view word = tok_->read_identifier();
 
         if (word == "true" || word == "false" || word == "null" || word == "undefined" || word == "this") {
-            return std::make_unique<JSNode>(JSNodeType::LITERAL, word);
+            return stamp_node(std::make_unique<JSNode>(JSNodeType::LITERAL, word), tok_->pos() - word.size());
         }
 
         if (word == "new") {
+            size_t new_start = tok_->pos() - word.size();
             auto new_expr = std::make_unique<JSNode>(JSNodeType::NEW_EXPR);
             skip_comments_and_whitespace();
             auto callee = parse_primary();
             if (callee) new_expr->children.push_back(std::move(callee));
             // Arguments
             if (tok_->peek() == '(') {
-                tok_->advance();
-                int paren_depth = 1;
-                while (!tok_->eof() && paren_depth > 0) {
-                    if (tok_->peek() == '(') paren_depth++;
-                    if (tok_->peek() == ')') { paren_depth--; if (paren_depth == 0) { tok_->advance(); break; } }
-                    tok_->advance();
-                }
+                tok_->advance(); // (
+                parse_call_arguments(new_expr);
             }
-            return new_expr;
+            return stamp_node(std::move(new_expr), new_start);
         }
 
         if (word == "function") {
-            return parse_function_expression(false);
+            return parse_function_expression(false, tok_->pos() - word.size());
         }
 
         if (word == "typeof" || word == "delete" || word == "void") {
+            size_t unary_start = tok_->pos() - word.size();
             auto unary = std::make_unique<JSNode>(JSNodeType::UNARY_EXPR, word);
             skip_comments_and_whitespace();
             auto operand = parse_expression(15);
             if (operand) unary->children.push_back(std::move(operand));
-            return unary;
+            return stamp_node(std::move(unary), unary_start);
         }
 
         // Identifier — check if it's a function call
+        size_t id_start = tok_->pos() - word.size();
         auto id = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, word);
+        id->src_start = id_start;
         id->is_reference = true;
         if (scope_) scope_->reference_variable(word);
 
         // Check for member access (. or [) or call (
         skip_comments_and_whitespace();
         if (tok_->peek() == '(') {
+            // This is a function call — mark the function as referenced
+            if (scope_) scope_->reference_function(word);
             auto call = std::make_unique<JSNode>(JSNodeType::CALL_EXPR, word);
-            tok_->advance(); // (
-            int depth = 1;
-            while (!tok_->eof() && depth > 0) {
-                if (tok_->peek() == '(') depth++;
-                if (tok_->peek() == ')') { depth--; if (depth == 0) { tok_->advance(); break; } }
-                tok_->advance();
-            }
             call->children.push_back(std::move(id));
+            tok_->advance(); // (
+            parse_call_arguments(call);
             maybe_track_dom_access(call);
-            return call;
+            return stamp_node(std::move(call), id_start);
         }
 
         if (tok_->peek() == '.') {
             auto member = std::make_unique<JSNode>(JSNodeType::MEMBER_EXPR);
             member->children.push_back(std::move(id));
+            size_t member_start = id_start;
 
             while (tok_->peek() == '.') {
                 tok_->advance();
                 std::string_view prop = tok_->read_identifier();
                 auto prop_node = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, prop);
+                prop_node->src_start = tok_->pos() - prop.size(); // start of prop after .
                 prop_node->is_reference = true;
                 member->children.push_back(std::move(prop_node));
 
                 // Check for call
                 if (tok_->peek() == '(') {
                     auto call = std::make_unique<JSNode>(JSNodeType::CALL_EXPR);
-                    tok_->advance();
-                    int depth = 1;
-                    while (!tok_->eof() && depth > 0) {
-                        if (tok_->peek() == '(') depth++;
-                        if (tok_->peek() == ')') { depth--; if (depth == 0) { tok_->advance(); break; } }
-                        tok_->advance();
-                    }
-                    // Move member under call
                     call->children.push_back(std::move(member));
+                    tok_->advance(); // (
+                    parse_call_arguments(call);
                     maybe_track_dom_access(call);
-                    return call;
+                    return stamp_node(std::move(call), member_start);
                 }
             }
-            return member;
+            return stamp_node(std::move(member), member_start);
         }
 
         if (tok_->peek() == '[') {
@@ -701,23 +729,26 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
             }
             auto member = std::make_unique<JSNode>(JSNodeType::MEMBER_EXPR);
             member->children.push_back(std::move(id));
-            return member;
+            return stamp_node(std::move(member), id_start);
         }
 
+        id->src_end = tok_->pos();
         return id;
     }
 
     // Unary operators
     if (c == '!' || c == '~' || c == '-' || c == '+') {
         tok_->advance();
+        size_t unary_start = tok_->pos() - 1; // one char consumed
         auto unary = std::make_unique<JSNode>(JSNodeType::UNARY_EXPR, std::string_view(&c, 1));
         auto operand = parse_expression(15);
         if (operand) unary->children.push_back(std::move(operand));
-        return unary;
+        return stamp_node(std::move(unary), unary_start);
     }
 
     // Parenthesized expression
     if (c == '(') {
+        size_t paren_start = tok_->pos();
         tok_->advance();
         auto expr = parse_expression();
         tok_->match(')');
@@ -745,7 +776,7 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
 
             auto arrow = std::make_unique<JSNode>(JSNodeType::FUNC_EXPR);
             arrow->children.push_back(std::move(body));
-            return arrow;
+            return stamp_node(std::move(arrow), paren_start);
         }
 
         return expr;
@@ -843,6 +874,14 @@ void JSParser::exit_scope() {
     if (scope_ && scope_->parent()) {
         scope_ = scope_->parent();
     }
+}
+
+std::unique_ptr<JSNode> JSParser::stamp_node(std::unique_ptr<JSNode> node, size_t start) {
+    if (node) {
+        node->src_start = start;
+        node->src_end = tok_ ? tok_->pos() : start;
+    }
+    return node;
 }
 
 } // namespace tinyizer

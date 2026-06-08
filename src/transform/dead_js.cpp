@@ -1,35 +1,50 @@
 #include "optimizer.h"
-#include <functional>
 
 namespace tinyizer {
 
 // Dead JS elimination via scope analysis.
 //
-// Algorithm:
-// 1. Walk the JS scope tree starting from the global scope
-// 2. For each variable/function, check if it's referenced
-// 3. Variables that are declared but never referenced are candidates for removal
-// 4. Export declarations are always kept
-// 5. This pass provides the data; actual removal happens during serialization
+// Walks the JSScope tree and collects original names that are:
+//   - Declared but never referenced
+//   - Not exported (no export keyword)
+//
+// Populates doc.dead_js_names (original names before renaming);
+// actual removal happens in optimize().
+
+static void collect_dead_names(const JSScope* scope, std::unordered_set<std::string>& dead) {
+    if (!scope) return;
+
+    // Variables: declared but not referenced and not exported
+    for (const auto& [name, var] : scope->variables()) {
+        if (var.is_declared && !var.is_referenced && !var.is_exported) {
+            dead.insert(name);
+        }
+    }
+
+    // Functions: not referenced and not exported
+    for (const auto& [name, fn] : scope->functions()) {
+        if (!fn.is_referenced && !fn.is_exported) {
+            dead.insert(name);
+        }
+    }
+
+    for (const auto& child : scope->children()) {
+        collect_dead_names(child.get(), dead);
+    }
+}
 
 bool Optimizer::pass_dead_js(UnifiedDocument& doc) {
     if (!doc.js_root_scope()) return false;
 
-    bool found_dead = false;
+    std::unordered_set<std::string> dead;
+    collect_dead_names(doc.js_root_scope(), dead);
 
-    std::function<void(JSScope*)> analyze_scope = [&](JSScope* scope) {
-        // Check variables in this scope
-        // (Variables are stored in a map — we'd need to access internals)
-        // For now, this is a structural pass that marks unused declarations.
+    if (dead == doc.dead_js_names) {
+        return false;
+    }
 
-        for (auto& child : const_cast<std::vector<std::unique_ptr<JSScope>>&>(scope->children())) {
-            analyze_scope(child.get());
-        }
-    };
-
-    analyze_scope(doc.js_root_scope());
-
-    return found_dead;
+    doc.dead_js_names = std::move(dead);
+    return true;
 }
 
 } // namespace tinyizer

@@ -42,6 +42,8 @@ struct JSNode {
     JSScope* scope = nullptr;  // scope where this was parsed (for resolution)
     bool is_declaration = false;
     bool is_reference = false;
+    size_t src_start = 0;      // byte offset in source
+    size_t src_end = 0;        // byte offset in source (exclusive)
 
     JSNode(JSNodeType t) : type(t) {}
     JSNode(JSNodeType t, std::string_view v) : type(t), value(v) {}
@@ -83,13 +85,17 @@ private:
     std::unique_ptr<JSNode> parse_call_expression();
     std::unique_ptr<JSNode> parse_object_literal();
     std::unique_ptr<JSNode> parse_array_literal();
-    std::unique_ptr<JSNode> parse_function_expression(bool is_arrow = false);
+    std::unique_ptr<JSNode> parse_function_expression(bool is_arrow = false, size_t start = 0);
 
     // Helpers
     void skip_comments_and_whitespace();
+    void parse_call_arguments(std::unique_ptr<JSNode>& call);
     void enter_scope(std::unique_ptr<JSScope> scope);
     void exit_scope();
     static int precedence_of(std::string_view op);
+
+    // Stamp source positions on a newly built node
+    std::unique_ptr<JSNode> stamp_node(std::unique_ptr<JSNode> node, size_t start);
 
     // Track DOM accesses
     void maybe_track_dom_access(std::unique_ptr<JSNode>& node);

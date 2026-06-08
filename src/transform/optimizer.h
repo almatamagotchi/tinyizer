@@ -18,6 +18,9 @@ struct OptimizationConfig {
     bool enable_brotli_reorder = false;  // experimental
     bool enable_obfuscation = false;
 
+    // Debug flags
+    bool debug_dead_js = false;
+
     // Max iterations for fixed-point optimization loop
     int max_iterations = 10;
 

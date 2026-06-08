@@ -37,7 +37,13 @@ public:
     void add_selector_part(SelectorPart part) { selector_parts_.push_back(part); }
 
     const std::vector<std::vector<SelectorPart>>& selectors() const { return selectors_; }
-    void add_selector(std::vector<SelectorPart> sel) { selectors_.push_back(std::move(sel)); }
+    void add_selector(std::vector<SelectorPart> sel) {
+        // Also populate legacy flat storage for backward compat
+        for (const auto& p : sel) {
+            selector_parts_.push_back(p);
+        }
+        selectors_.push_back(std::move(sel));
+    }
 
     const std::vector<Declaration>& declarations() const { return declarations_; }
     void add_declaration(Declaration decl) { declarations_.push_back(std::move(decl)); }

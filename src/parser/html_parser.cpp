@@ -55,7 +55,9 @@ void HTMLParser::parse_doctype(DOMNode* parent) {
         tok_->advance();
     }
     tok_->match('>');
-    // We don't create a DOCTYPE node for now — just skip it
+    // Create a DOCTYPE node so the serializer can emit <!doctypehtml>
+    auto doctype = std::make_unique<DOMNode>(DOMNode::Type::DOCTYPE, pool_.intern("html"));
+    parent->add_child(std::move(doctype));
 }
 
 void HTMLParser::parse_children(DOMNode* parent, const std::unordered_set<std::string_view>& stop_tags) {
@@ -114,7 +116,7 @@ DOMNode* HTMLParser::parse_element() {
         tag_lower += (c >= 'A' && c <= 'Z') ? (c + 32) : c;
     }
 
-    auto* element = new DOMNode(DOMNode::Type::ELEMENT, pool_.intern(tag_name));
+    auto* element = new DOMNode(DOMNode::Type::ELEMENT, pool_.intern(tag_lower));
 
     parse_attributes(element);
 
@@ -157,13 +159,20 @@ void HTMLParser::parse_attributes(DOMNode* element) {
         char c = tok_->peek();
         if (c == '>' || c == '/' || c == '\0') break;
 
-        // Attribute name
-        std::string_view name = tok_->read_identifier();
-        if (name.empty()) {
+        // Attribute name — lowercase for case normalization
+        std::string_view raw_name = tok_->read_identifier();
+        if (raw_name.empty()) {
             // Unexpected char, skip it
             tok_->advance();
             continue;
         }
+
+        // Lowercase the attribute name
+        std::string name_lower;
+        for (char ch : raw_name) {
+            name_lower += (ch >= 'A' && ch <= 'Z') ? (ch + 32) : ch;
+        }
+        const char* name = pool_.intern(name_lower);
 
         tok_->skip_whitespace();
 
@@ -199,14 +208,12 @@ void HTMLParser::parse_attributes(DOMNode* element) {
                 value = tok_->substr(start, tok_->pos());
             }
 
-            // Intern both name and value
-            const char* iname = pool_.intern(name);
+            // Intern value
             const char* ivalue = pool_.intern(value);
-            element->add_attr(iname, ivalue, has_quotes);
+            element->add_attr(name, ivalue, has_quotes);
         } else {
             // Boolean attribute (no value)
-            const char* iname = pool_.intern(name);
-            element->add_attr(iname, pool_.intern(""), false);
+            element->add_attr(name, pool_.intern(""), false);
         }
     }
 }

@@ -18,6 +18,8 @@ public:
 
     void record_n(const Key& id, uint32_t n) { freq_[id] += n; }
 
+    void remove(const Key& id) { freq_.erase(id); }
+
     uint32_t count(const Key& id) const {
         auto it = freq_.find(id);
         return it != freq_.end() ? it->second : 0;

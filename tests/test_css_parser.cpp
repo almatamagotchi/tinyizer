@@ -22,7 +22,7 @@ int main() {
         assert(rule.selector_parts().size() > 0);
         assert(rule.declarations().size() == 1);
         assert(rule.declarations()[0].property == "color");
-        assert(rule.declarations()[0].value == " red");
+         assert(rule.declarations()[0].value == "red");
         OK();
     }
 

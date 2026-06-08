@@ -115,6 +115,8 @@ int main(int argc, char* argv[]) {
             config.enable_brotli_reorder = true;
         } else if (arg == "--stats") {
             show_stats = true;
+        } else if (arg == "--debug-dead-js") {
+            config.debug_dead_js = true;
         } else if (arg == "--max-passes" && i + 1 < argc) {
             config.max_iterations = std::atoi(argv[++i]);
         } else if (arg[0] != '-') {
@@ -171,7 +173,8 @@ int main(int argc, char* argv[]) {
         auto inline_js = html_parser.take_inline_scripts();
         for (auto& js : inline_js) {
             doc.add_inline_script(js);
-            js_parser.parse(js, doc.js_root_scope());
+            auto ast = js_parser.parse(js, doc.js_root_scope());
+            doc.add_js_script_ast(std::move(ast));
         }
     } else if (type == FileType::CSS) {
         auto rules = css_parser.parse(input);
@@ -181,7 +184,8 @@ int main(int argc, char* argv[]) {
         doc.set_root(std::move(root));
     } else if (type == FileType::JS) {
         doc.add_inline_script(input);
-        js_parser.parse(input, doc.js_root_scope());
+        auto ast = js_parser.parse(input, doc.js_root_scope());
+        doc.add_js_script_ast(std::move(ast));
         // Create minimal DOM root for reference
         auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, doc.string_pool().intern("__root__"));
         doc.set_root(std::move(root));
