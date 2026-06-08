@@ -144,8 +144,8 @@ int main(int argc, char* argv[]) {
     // Disable DOM-dependent passes for standalone CSS/JS files
     if (type == FileType::CSS || type == FileType::JS) {
         config.enable_dead_css = false;
-        config.enable_dead_js = false;
         config.enable_html_minify = false;
+        // dead_js works from the JS scope tree — no DOM dependency
     }
 
     // Build unified document and run optimization pipeline
@@ -205,26 +205,10 @@ int main(int argc, char* argv[]) {
         // Standalone CSS output — serialize all stylesheets
         output = serialize_css(doc.stylesheets());
     } else if (type == FileType::JS) {
-        // Standalone JS output — combine all optimized scripts
-        for (auto& js : doc.inline_scripts()) {
-            std::string opt_js = js;
-            // Apply JS renames
-            for (auto& [old_name_sv, new_name] : doc.js_rename_map) {
-                std::string old_name(old_name_sv);
-                size_t pos = 0;
-                while ((pos = opt_js.find(old_name, pos)) != std::string::npos) {
-                    bool left_ok = (pos == 0 || !is_ident_char(opt_js[pos - 1]));
-                    bool right_ok = (pos + old_name.size() >= opt_js.size() || !is_ident_char(opt_js[pos + old_name.size()]));
-                    if (left_ok && right_ok) {
-                        opt_js.replace(pos, old_name.size(), new_name);
-                        pos += new_name.size();
-                    } else {
-                        pos++;
-                    }
-                }
-            }
-            // Minify
-            opt_js = minify_js_text(opt_js);
+        // Standalone JS output — use fully-processed optimized_js from the
+        // optimization pipeline (already includes dead-code elimination,
+        // console stripping, constant folding, renames, and minification).
+        for (auto& opt_js : doc.optimized_js) {
             if (!output.empty() && !opt_js.empty()) output += ';';
             output += opt_js;
         }
