@@ -4,7 +4,7 @@
 
 Zero dependencies beyond C++20 + CMake. Single-pass streaming parser, unified IR, multi-stage optimization — producing the smallest possible output while preserving identical browser rendering.
 
-Built by [Alma Tamagotchi](https://github.com/almatamagotchi), an AI assistant, with algorithmic depth over ease of implementation.
+Built by [Alma Tamagotchi](https://github.com/almatamagotchi) with algorithmic depth over ease of implementation.
 
 ## Quick numbers
 
@@ -66,23 +66,34 @@ cd build && ./tests/test_html_parser && ./tests/test_css_parser && ./tests/test_
 
 ## Benchmarks
 
+### Full-page minifiers (apples-to-apples)
+
+These tools produce a complete, browser-ready HTML page — CSS, JS, and structure all minified together.
+
 | Tool | test_page.html | test_page2.html | test_page3.html |
 |------|:---:|:---:|:---:|
 | **tinyizer** | **785** | **279** | **191** |
-| cminify | 1,263 | 433 | 328 |
-| Lightning CSS¹ | 343 | 143 | 115 |
+| Pipeline¹ | 839 | 291 | 251 |
 | html-minifier-terser | 1,178 | 370 | 276 |
-| Terser² | 230 | 108 | 71 |
-| Google Closure Compiler² | 94 | 28 | 45 |
-| Pipeline³ (lc+cc+hmt) | 839 | 291 | 251 |
+| cminify | 1,263 | 433 | 328 |
 
-**tinyizer now beats all competitors on every test page**, including the best-of-breed pipeline. 🏆
+¹ Lightning CSS (CSS) + Google Closure Compiler ADVANCED (JS) + html-minifier-terser (HTML). Best-of-breed combo for each language.
 
-*Benchmarks are run via CI on every push. Full results in [`benchmarks/`](benchmarks/).*
+**tinyizer beats every full-page minifier on every test page**, including a best-of-breed pipeline.
 
-¹ Lightning CSS is CSS-only; numbers shown are CSS-block sizes (not full page). For fair comparison, pair with an HTML minifier.
-² Terser and Google Closure Compiler are JS-only; numbers shown are JS-block sizes (not full page). For fair comparison, pair with an HTML/CSS minifier.
-³ Full-page pipeline: Lightning CSS (CSS) + Closure Compiler ADVANCED (JS) + html-minifier-terser (HTML skeleton). Full-page comparison. Run via `benchmarks/pipeline.sh`.
+### Per-language tools (for reference)
+
+These minify only one language. The numbers shown are **CSS-only or JS-only** — not a full page. Listed for transparency.
+
+| Tool | Scope | test_page | test_page2 | test_page3 |
+|------|:-----:|:---:|:---:|:---:|
+| Google Closure Compiler | JS only | 94 | 28 | 45 |
+| Terser | JS only | 230 | 108 | 71 |
+| Lightning CSS | CSS only | 343 | 143 | 115 |
+
+*Full-page comparison = combining these tools with an HTML minifier (see Pipeline above).*
+
+*All benchmarks are run via CI on every push. See [`benchmarks/`](benchmarks/).*
 
 ## License
 
