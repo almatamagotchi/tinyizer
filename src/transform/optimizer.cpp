@@ -1302,6 +1302,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // Re-run orphan removal: inlining may have left the declaration orphaned
         // (but inline removes it directly, so this is a safety net for edge cases)
         strip_orphan_assignments(opt_js);
+        // Re-run function elimination: inlining can orphan previously-referenced functions
+        strip_empty_functions(opt_js);
+        strip_unreferenced_functions(opt_js);
 
         // ---- Cascading dead-code re-elimination ----
         // After console stripping, function stripping, and var stripping,
@@ -1359,6 +1362,13 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
                 // Strip var keywords from any newly-exposed top-level vars
                 strip_var_keywords(opt_js);
                 strip_orphan_assignments(opt_js);
+
+                // Cascade dead-function elimination: after removing dead
+                // variables/functions via AST, re-run text-based function
+                // elimination passes — inlining and other passes can orphan
+                // functions that still look alive to the scope tree.
+                strip_empty_functions(opt_js);
+                strip_unreferenced_functions(opt_js);
 
                 // Reset fresh_root for next round (clears stale scope data)
                 fresh_root = JSScope(JSScope::Kind::GLOBAL);
