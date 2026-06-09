@@ -132,6 +132,41 @@ static void collect_js_classes(const std::vector<std::string>& scripts,
             p = cls + 1;
         }
 
+        // Scan for querySelector(".class") and querySelectorAll(".class")
+        p = script.data();
+        while (p < end) {
+            const char* qs = std::strstr(p, "querySelector");
+            if (!qs) break;
+            const char* rest = qs + 13;
+            const char* open = nullptr;
+            for (const char* q = rest; q < end && q - rest < 20; q++) {
+                if (*q == '(') { open = q; break; }
+            }
+            if (!open) { p = qs + 1; continue; }
+            const char* args = open + 1;
+            while (args < end && (*args == ' ' || *args == '\t')) args++;
+            if (args < end && (*args == '\'' || *args == '"')) {
+                char quote = *args;
+                const char* val_start = args + 1;
+                const char* val_end = val_start;
+                while (val_end < end && *val_end != quote && *val_end != '\n') {
+                    if (*val_end == '.') {
+                        const char* cls_start = val_end + 1;
+                        const char* cls_end = cls_start;
+                        while (cls_end < end && *cls_end != quote && *cls_end != '\n' &&
+                               *cls_end != '.' && *cls_end != '#' && *cls_end != ' ' &&
+                               *cls_end != '>' && *cls_end != '+' && *cls_end != '~' &&
+                               *cls_end != ':' && *cls_end != '[') cls_end++;
+                        if (cls_end > cls_start) {
+                            classes.emplace(cls_start, cls_end - cls_start);
+                        }
+                    }
+                    val_end++;
+                }
+            }
+            p = qs + 1;
+        }
+
         // Scan for className = '...' or className += '...'
         p = script.data();
         while (p < end) {

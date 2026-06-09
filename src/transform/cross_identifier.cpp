@@ -100,21 +100,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         }
     }
 
-    // ---- Remove JS-touched classes from rename candidates ----
-    // Classes detected in JS string literals (classList.add("foo"), etc.)
-    // must NOT be renamed because we can't reliably rewrite those string literals.
-    // Renaming the CSS selector but leaving the JS string unchanged would break
-    // the class match at runtime.
-    for (const auto& js_cls : doc.js_touched_classes) {
-        freq_map.remove(js_cls);
-    }
-
-    // ---- Remove JS-touched IDs from rename candidates ----
-    // Same reasoning: IDs used in getElementById("foo") or querySelector("#bar")
-    // must not be renamed because the JS string literal won't be updated.
-    for (const auto& js_id : doc.js_touched_ids) {
-        freq_map.remove(js_id);
-    }
+    // ---- JS-touched names are NO LONGER removed from rename candidates ----
 
     // ---- Check if we have enough identifiers to squeeze ----
     if (freq_map.size() < 2) return false;
@@ -265,11 +251,8 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         });
     }
 
-    // ---- Apply renames to JS (handled during serialization) ----
-    // The JS rename map is stored for use during output generation.
-    // A full implementation would walk the JS AST and apply renames.
-    // For now, we've done the cross-language rename analysis.
-
+    // ---- JS-touched names are no longer removed from rename candidates.
+    // String-literal updates happen in optimizer.cpp after optimized_js is generated.
     return !rename_map.empty();
 }
 

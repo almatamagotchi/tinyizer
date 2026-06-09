@@ -318,6 +318,118 @@ static void scan_string_ranges_in_text(const std::string& text,
     std::sort(ranges.begin(), ranges.end());
 }
 
+// ---- JS string-literal replacement for renamed classes/IDs ----
+// After the optimization loop renames HTML/CSS class and ID values,
+// this updates string literals in optimized JS (getElementById, classList,
+// querySelector, setAttribute) to match the new short names.
+static void apply_js_string_renames(UnifiedDocument& doc) {
+    // Build replacement map: original name → new short name, but only for
+    // names that are actually referenced in JS string literals.
+    std::unordered_map<std::string, std::string> replace;
+
+    // Use cumulative_rename for the final mapping (accumulated across iterations)
+    for (const auto& [orig_name, curr_name] : doc.cumulative_rename) {
+        if (orig_name != curr_name) {
+            if (doc.js_touched_classes.count(std::string(orig_name)) > 0 ||
+                doc.js_touched_ids.count(std::string(orig_name)) > 0) {
+                replace[std::string(orig_name)] = curr_name;
+            }
+        }
+    }
+
+    // Also check css_rename_map/js_rename_map (fresh renames from last iteration)
+    for (const auto& [orig_name, new_name] : doc.css_rename_map) {
+        std::string orig_str(orig_name);
+        if (doc.js_touched_classes.count(orig_str) > 0 ||
+            doc.js_touched_ids.count(orig_str) > 0) {
+            // Only add if not already in cumulative (prefer cumulative)
+            if (replace.find(orig_str) == replace.end()) {
+                replace[orig_str] = new_name;
+            }
+        }
+    }
+
+    if (replace.empty() || doc.optimized_js.empty()) return;
+
+    for (auto& script : doc.optimized_js) {
+        for (const auto& [old_name, new_name] : replace) {
+            // --- ID lookups ---
+            // getElementById("X")
+            for (const char* quote : {"\"", "'"}) {
+                std::string search = std::string("getElementById(") + quote + old_name + quote + ")";
+                std::string repl   = std::string("getElementById(") + quote + new_name + quote + ")";
+                size_t pos = 0;
+                while ((pos = script.find(search, pos)) != std::string::npos) {
+                    script.replace(pos, search.size(), repl);
+                    pos += repl.size();
+                }
+            }
+
+            // querySelector("#X") / querySelectorAll("#X")
+            for (const char* quote : {"\"", "'"}) {
+                for (const char* fn : {"querySelector(", "querySelectorAll("}) {
+                    std::string search = std::string(fn) + quote + "#" + old_name + quote + ")";
+                    std::string repl   = std::string(fn) + quote + "#" + new_name + quote + ")";
+                    size_t pos = 0;
+                    while ((pos = script.find(search, pos)) != std::string::npos) {
+                        script.replace(pos, search.size(), repl);
+                        pos += repl.size();
+                    }
+                }
+            }
+
+            // --- Class lookups ---
+            // querySelector(".X") / querySelectorAll(".X")
+            for (const char* quote : {"\"", "'"}) {
+                for (const char* fn : {"querySelector(", "querySelectorAll("}) {
+                    std::string search = std::string(fn) + quote + "." + old_name + quote + ")";
+                    std::string repl   = std::string(fn) + quote + "." + new_name + quote + ")";
+                    size_t pos = 0;
+                    while ((pos = script.find(search, pos)) != std::string::npos) {
+                        script.replace(pos, search.size(), repl);
+                        pos += repl.size();
+                    }
+                }
+            }
+
+            // classList.add("X") / remove / toggle / contains
+            for (const char* quote : {"\"", "'"}) {
+                for (const char* method : {"add", "remove", "toggle", "contains"}) {
+                    std::string search = std::string("classList.") + method + "(" + quote + old_name + quote + ")";
+                    std::string repl   = std::string("classList.") + method + "(" + quote + new_name + quote + ")";
+                    size_t pos = 0;
+                    while ((pos = script.find(search, pos)) != std::string::npos) {
+                        script.replace(pos, search.size(), repl);
+                        pos += repl.size();
+                    }
+                }
+            }
+
+            // setAttribute("class", "X") / setAttribute("id", "X")
+            for (const char* attr : {"class", "id"}) {
+                for (const char* quote : {"\"", "'"}) {
+                    // With space: setAttribute("class", "X")
+                    std::string search = std::string("setAttribute(") + quote + attr + quote + ", " + quote + old_name + quote + ")";
+                    std::string repl   = std::string("setAttribute(") + quote + attr + quote + ", " + quote + new_name + quote + ")";
+                    size_t pos = 0;
+                    while ((pos = script.find(search, pos)) != std::string::npos) {
+                        script.replace(pos, search.size(), repl);
+                        pos += repl.size();
+                    }
+                    // No space: setAttribute("class","X") (common in minified output)
+                    search = std::string("setAttribute(") + quote + attr + quote + "," + quote + old_name + quote + ")";
+                    repl   = std::string("setAttribute(") + quote + attr + quote + "," + quote + new_name + quote + ")";
+                    pos = 0;
+                    while ((pos = script.find(search, pos)) != std::string::npos) {
+                        script.replace(pos, search.size(), repl);
+                        pos += repl.size();
+                    }
+                }
+            }
+        }
+    }
+}
+
 Optimizer::Optimizer(const OptimizationConfig& config) : config_(config) {}
 
 bool Optimizer::optimize(UnifiedDocument& doc) {
@@ -466,6 +578,12 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         opt_js = minify_js_text(opt_js);
         doc.optimized_js.push_back(std::move(opt_js));
     }
+
+    // ---- Apply JS string-literal renames for touched classes/IDs ----
+    // Names referenced in getElementById(), classList, querySelector(), etc.
+    // were previously excluded from renaming. Now that HTML/CSS have been
+    // renamed, we update the string literals in optimized JS to match.
+    apply_js_string_renames(doc);
 
     return any_change;
 }
