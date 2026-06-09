@@ -1492,7 +1492,59 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                     }
                 }
             }
-            if (!is_root && !is_implicit) {
+            // HTML5 optional START tags: tbody, colgroup
+            // (html, head, body are handled as is_implicit above — both start+end omitted)
+            bool can_omit_start = false;
+            if (!is_implicit && !is_root) {
+                if (node.tag_name() == "tbody" || node.tag_name() == "colgroup") {
+                    const auto& children = node.children();
+                    bool first_child_ok = false;
+                    if (!children.empty()) {
+                        const auto* fc = children[0].get();
+                        first_child_ok = (fc->type() == DOMNode::Type::ELEMENT &&
+                            ((node.tag_name() == "tbody" && fc->tag_name() == "tr") ||
+                             (node.tag_name() == "colgroup" && fc->tag_name() == "col")));
+                    }
+                    if (first_child_ok) {
+                        const DOMNode* parent = node.parent();
+                        if (parent) {
+                            const auto& sibs = parent->children();
+                            size_t my_idx = 0;
+                            for (; my_idx < sibs.size(); ++my_idx) {
+                                if (sibs[my_idx].get() == &node) break;
+                            }
+                            bool preceded_by_omitted = false;
+                            if (my_idx > 0) {
+                                const auto* prev = sibs[my_idx - 1].get();
+                                if (prev && prev->type() == DOMNode::Type::ELEMENT) {
+                                    bool prev_in_family = false;
+                                    if (node.tag_name() == "tbody") {
+                                        prev_in_family = (prev->tag_name() == "tbody" ||
+                                                         prev->tag_name() == "thead" ||
+                                                         prev->tag_name() == "tfoot");
+                                    } else { // colgroup
+                                        prev_in_family = (prev->tag_name() == "colgroup");
+                                    }
+                                    if (prev_in_family) {
+                                        // Would prev's end tag be omitted? Same rules as can_omit_end:
+                                        // last child of parent, or next sibling has same tag
+                                        // prev's next sibling is us (at my_idx)
+                                        if (node.tag_name() == prev->tag_name()) {
+                                            preceded_by_omitted = true;
+                                        } else if (my_idx >= sibs.size()) {
+                                            preceded_by_omitted = true;
+                                        }
+                                    }
+                                }
+                            }
+                            can_omit_start = !preceded_by_omitted;
+                        } else {
+                            can_omit_start = true;
+                        }
+                    }
+                }
+            }
+            if (!is_root && !is_implicit && !can_omit_start) {
                 // Skip empty <script> elements (all JS was dead/minified away)
                 if (is_script && script_idx < (int)doc.optimized_js.size() &&
                     doc.optimized_js[script_idx].empty()) {
