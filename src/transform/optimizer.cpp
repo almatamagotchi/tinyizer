@@ -513,10 +513,46 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
         void serialize_element(const DOMNode& node, int depth) {
             // Skip the synthetic __root__ element
             bool is_root = (node.tag_name() == std::string_view("__root__"));
-            // HTML5 optional tags: <html>, <head>, <body>, </html>, </head>, </body>
+            // HTML5 optional start+end tags: <html>, <head>, <body>, </html>, </head>, </body>
             bool is_implicit = (node.tag_name() == "html" ||
                                node.tag_name() == "head" ||
                                node.tag_name() == "body");
+            // HTML5 optional END tags (but start tag required):
+            // li, dt, dd, p, rt, rp, optgroup, option, colgroup,
+            // thead, tbody, tfoot, tr, td, th
+            // Condition: element is immediately followed by same-type sibling
+            // or is the last child of its parent (no more content).
+            bool can_omit_end = false;
+            if (!is_implicit && !is_root) {
+                static const std::unordered_set<std::string_view> omit_end_set = {
+                    "li", "dt", "dd", "p", "rt", "rp", "optgroup", "option",
+                    "colgroup", "thead", "tbody", "tfoot", "tr", "td", "th"
+                };
+                if (omit_end_set.count(node.tag_name())) {
+                    // Check if this is the last child or next sibling has same tag
+                    const DOMNode* parent = node.parent();
+                    if (parent) {
+                        const auto& siblings = parent->children();
+                        // Find this node's index in siblings
+                        size_t my_idx = 0;
+                        for (; my_idx < siblings.size(); ++my_idx) {
+                            if (siblings[my_idx].get() == &node) break;
+                        }
+                        if (my_idx + 1 >= siblings.size()) {
+                            // Last child — end tag can be omitted
+                            can_omit_end = true;
+                        } else {
+                            // Check next sibling's tag
+                            const auto* next = siblings[my_idx + 1].get();
+                            if (next && next->type() == DOMNode::Type::ELEMENT &&
+                                next->tag_name() == node.tag_name()) {
+                                // Next sibling is same type — end tag can be omitted
+                                can_omit_end = true;
+                            }
+                        }
+                    }
+                }
+            }
             if (!is_root && !is_implicit) {
                 out += '<';
                 out += node.tag_name();
@@ -627,7 +663,7 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                 serialize_node(*child, is_root ? depth : depth + 1);
             }
 
-            if (!is_root && !is_implicit) {
+            if (!is_root && !is_implicit && !can_omit_end) {
                 out += "</";
                 out += node.tag_name();
                 out += '>';
