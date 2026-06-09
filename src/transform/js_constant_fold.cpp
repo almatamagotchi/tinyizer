@@ -210,6 +210,382 @@ static std::string fold_string_concat(const std::string& js) {
     return result;
 }
 
+// Find matching closing brace from position after '{'
+static size_t find_matching_brace(const std::string& s, size_t open_pos) {
+    int depth = 0;
+    bool in_string = false;
+    char str_char = 0;
+    bool in_tmpl = false;
+    for (size_t i = open_pos; i < s.size(); i++) {
+        char c = s[i];
+        if (in_string) {
+            if (c == '\\') { i++; continue; }
+            if (c == str_char) in_string = false;
+            continue;
+        }
+        if (in_tmpl) {
+            if (c == '\\') { i++; continue; }
+            if (c == '`') in_tmpl = false;
+            continue;
+        }
+        if (c == '"' || c == '\'') { in_string = true; str_char = c; continue; }
+        if (c == '`') { in_tmpl = true; continue; }
+        if (c == '{') depth++;
+        else if (c == '}') { depth--; if (depth == 0) return i; }
+    }
+    return std::string::npos;
+}
+
+// Find matching semicolon for a statement starting at pos (skips nested braces/blocks)
+static size_t find_statement_end(const std::string& s, size_t pos) {
+    int brace_depth = 0;
+    bool in_string = false;
+    char str_char = 0;
+    bool in_tmpl = false;
+    for (size_t i = pos; i < s.size(); i++) {
+        char c = s[i];
+        if (in_string) {
+            if (c == '\\') { i++; continue; }
+            if (c == str_char) in_string = false;
+            continue;
+        }
+        if (in_tmpl) {
+            if (c == '\\') { i++; continue; }
+            if (c == '`') in_tmpl = false;
+            continue;
+        }
+        if (c == '"' || c == '\'') { in_string = true; str_char = c; continue; }
+        if (c == '`') { in_tmpl = true; continue; }
+        if (c == '{') brace_depth++;
+        else if (c == '}') brace_depth--;
+        else if (c == ';' && brace_depth == 0) return i;
+    }
+    return std::string::npos;
+}
+
+// Skip whitespace starting at pos, return position of first non-whitespace char
+static size_t skip_ws(const std::string& s, size_t pos) {
+    while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) pos++;
+    return pos;
+}
+
+// Fold dead branches: if(false){...}, if(true){...}, while(false){...}
+// Keeps the body for if(true), removes body for if(false)/while(false).
+// Also handles if(true)...else{...} and if(false)...else{...}
+// Uses manual regex_search loop to correctly handle if/else cascades
+// (e.g., if(false)...else if(true)... where the else's if is consumed as part
+// of the outer if's else branch, not processed as a separate match).
+static std::string fold_dead_branches(const std::string& js) {
+    std::string result;
+    result.reserve(js.size());
+    bool changed = false;
+
+    std::regex cond_re(R"((if|while)\s*\(\s*(true|false|0|1|!0|!1)\s*\))");
+    std::smatch m;
+
+    size_t last_end = 0;
+    std::string search_str = js;
+
+    while (std::regex_search(search_str, m, cond_re)) {
+        size_t match_start = m.position();
+        size_t match_end = match_start + m.length();
+
+        // Copy text before match to result
+        result += search_str.substr(0, match_start);
+
+        std::string keyword = m[1].str();
+        std::string condition = m[2].str();
+        bool is_truthy = (condition == "true" || condition == "1" || condition == "!0");
+        bool is_falsy  = (condition == "false" || condition == "0" || condition == "!1");
+
+        size_t pos = skip_ws(search_str, match_end);
+        if (pos >= search_str.size()) {
+            result += m.str();
+            search_str = search_str.substr(match_end);
+            continue;
+        }
+
+        if (search_str[pos] == '{') {
+            // Braced block
+            size_t close_brace = find_matching_brace(search_str, pos);
+            if (close_brace == std::string::npos) {
+                result += m.str();
+                search_str = search_str.substr(match_end);
+                continue;
+            }
+            size_t block_end = close_brace + 1;
+
+            if (keyword == "while" && is_falsy) {
+                changed = true;
+                search_str = search_str.substr(block_end);
+                continue;
+            }
+            if (keyword == "while" && is_truthy) {
+                result += m.str();
+                search_str = search_str.substr(match_end);
+                continue;
+            }
+
+            std::string body = search_str.substr(pos + 1, close_brace - pos - 1);
+
+            size_t after_block = skip_ws(search_str, block_end);
+            bool has_else = (after_block + 4 <= search_str.size() &&
+                             search_str.substr(after_block, 4) == "else");
+
+            if (is_truthy) {
+                changed = true;
+                result += body;
+                if (has_else) {
+                    size_t else_pos = skip_ws(search_str, after_block + 4);
+                    if (else_pos < search_str.size() && search_str[else_pos] == '{') {
+                        // else { ... } — discard else block
+                        size_t else_close = find_matching_brace(search_str, else_pos);
+                        if (else_close != std::string::npos) {
+                            search_str = search_str.substr(else_close + 1);
+                        } else {
+                            search_str = search_str.substr(block_end);
+                        }
+                    } else if (else_pos + 2 <= search_str.size() &&
+                               search_str.substr(else_pos, 2) == "if") {
+                        // else if(...)... — discard entire else-if chain
+                        // Find end of else-if statement and skip it
+                        size_t if_pos = skip_ws(search_str, else_pos + 2);
+                        if (if_pos < search_str.size() &&
+                            search_str[if_pos] == '(') {
+                            int p_depth = 0;
+                            size_t paren_close = std::string::npos;
+                            for (size_t pi = if_pos; pi < search_str.size(); pi++) {
+                                if (search_str[pi] == '(') p_depth++;
+                                else if (search_str[pi] == ')') {
+                                    if (--p_depth == 0) {
+                                        paren_close = pi;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (paren_close != std::string::npos) {
+                                size_t body_start =
+                                    skip_ws(search_str, paren_close + 1);
+                                if (body_start < search_str.size()) {
+                                    if (search_str[body_start] == '{') {
+                                        size_t body_close = find_matching_brace(
+                                            search_str, body_start);
+                                        if (body_close != std::string::npos) {
+                                            search_str =
+                                                search_str.substr(body_close + 1);
+                                        } else {
+                                            search_str =
+                                                search_str.substr(block_end);
+                                        }
+                                    } else {
+                                        size_t stmt_end = find_statement_end(
+                                            search_str, body_start);
+                                        search_str = search_str.substr(
+                                            (stmt_end != std::string::npos)
+                                                ? stmt_end + 1
+                                                : block_end);
+                                    }
+                                } else {
+                                    search_str = search_str.substr(block_end);
+                                }
+                            } else {
+                                search_str = search_str.substr(block_end);
+                            }
+                        } else {
+                            search_str = search_str.substr(block_end);
+                        }
+                    } else {
+                        // else simple_statement; — discard it
+                        size_t stmt_end = find_statement_end(search_str, else_pos);
+                        search_str = search_str.substr(
+                            (stmt_end != std::string::npos) ? stmt_end + 1
+                                                             : block_end);
+                    }
+                } else {
+                    search_str = search_str.substr(block_end);
+                }
+                continue;
+            }
+
+            if (is_falsy) {
+                changed = true;
+                if (has_else) {
+                    size_t else_pos = skip_ws(search_str, after_block + 4);
+                    if (else_pos < search_str.size() && search_str[else_pos] == '{') {
+                        // else { ... }
+                        size_t else_close = find_matching_brace(search_str, else_pos);
+                        if (else_close != std::string::npos) {
+                            result += search_str.substr(else_pos + 1,
+                                                        else_close - else_pos - 1);
+                            search_str = search_str.substr(else_close + 1);
+                        } else {
+                            search_str = search_str.substr(block_end);
+                        }
+                    } else if (else_pos + 2 <= search_str.size() &&
+                               search_str.substr(else_pos, 2) == "if") {
+                        // else if(...){...} or else if(...)stmt; — keep the
+                        // entire if construct as-is; next iteration of
+                        // fold_dead_branches (called from fold_constants_in_text
+                        // loop) will process it.
+                        // Find the end of this if statement.
+                        size_t if_end = match_end; // will be wrong, compute
+                        size_t if_pos = skip_ws(search_str, else_pos + 2);
+                        if (if_pos < search_str.size() &&
+                            search_str[if_pos] == '(') {
+                            // find closing paren
+                            int p_depth = 0;
+                            size_t paren_close = std::string::npos;
+                            for (size_t pi = if_pos; pi < search_str.size(); pi++) {
+                                if (search_str[pi] == '(') p_depth++;
+                                else if (search_str[pi] == ')') {
+                                    if (--p_depth == 0) {
+                                        paren_close = pi;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (paren_close != std::string::npos) {
+                                size_t body_start = skip_ws(search_str, paren_close + 1);
+                                if (body_start < search_str.size()) {
+                                    if (search_str[body_start] == '{') {
+                                        size_t body_close =
+                                            find_matching_brace(search_str, body_start);
+                                        if (body_close != std::string::npos) {
+                                            // Copy the else-if text and consume
+                                            result += search_str.substr(
+                                                else_pos, body_close + 1 - else_pos);
+                                            search_str =
+                                                search_str.substr(body_close + 1);
+                                        }
+                                    } else {
+                                        size_t stmt_end =
+                                            find_statement_end(search_str, body_start);
+                                        if (stmt_end != std::string::npos) {
+                                            result += search_str.substr(
+                                                else_pos, stmt_end + 1 - else_pos);
+                                            search_str =
+                                                search_str.substr(stmt_end + 1);
+                                        } else {
+                                            search_str =
+                                                search_str.substr(else_pos);
+                                        }
+                                    }
+                                } else {
+                                    search_str = search_str.substr(else_pos);
+                                }
+                            } else {
+                                search_str = search_str.substr(else_pos);
+                            }
+                        } else {
+                            search_str = search_str.substr(else_pos);
+                        }
+                    } else {
+                        // else simple_statement;
+                        size_t stmt_end = find_statement_end(search_str, else_pos);
+                        if (stmt_end != std::string::npos) {
+                            result += search_str.substr(else_pos,
+                                                        stmt_end - else_pos + 1);
+                            search_str = search_str.substr(stmt_end + 1);
+                        } else {
+                            // No semicolon? Consume to end-of-line or EOF.
+                            // Fallback: include remaining text
+                            result += search_str.substr(else_pos);
+                            search_str.clear();
+                        }
+                    }
+                } else {
+                    search_str = search_str.substr(block_end);
+                }
+                continue;
+            }
+        } else {
+            // Unbraced statement
+            size_t stmt_start = pos;
+            if (keyword == "while") {
+                if (is_falsy) {
+                    size_t stmt_end = find_statement_end(search_str, stmt_start);
+                    if (stmt_end != std::string::npos) {
+                        changed = true;
+                        search_str = search_str.substr(stmt_end + 1);
+                        continue;
+                    }
+                }
+                result += m.str();
+                search_str = search_str.substr(match_end);
+                continue;
+            }
+
+            size_t stmt_end = find_statement_end(search_str, stmt_start);
+            if (stmt_end == std::string::npos) {
+                result += m.str();
+                search_str = search_str.substr(match_end);
+                continue;
+            }
+
+            size_t after_stmt = skip_ws(search_str, stmt_end + 1);
+            bool has_else = (after_stmt + 4 <= search_str.size() &&
+                             search_str.substr(after_stmt, 4) == "else");
+
+            if (is_truthy) {
+                changed = true;
+                result += search_str.substr(stmt_start, stmt_end - stmt_start + 1);
+                if (has_else) {
+                    size_t else_pos = skip_ws(search_str, after_stmt + 4);
+                    if (else_pos < search_str.size() && search_str[else_pos] == '{') {
+                        size_t else_close = find_matching_brace(search_str, else_pos);
+                        search_str = search_str.substr(
+                            (else_close != std::string::npos) ? else_close + 1
+                                                               : stmt_end + 1);
+                    } else {
+                        size_t else_stmt_end = find_statement_end(search_str, else_pos);
+                        search_str = search_str.substr(
+                            (else_stmt_end != std::string::npos) ? else_stmt_end + 1
+                                                                  : stmt_end + 1);
+                    }
+                } else {
+                    search_str = search_str.substr(stmt_end + 1);
+                }
+                continue;
+            }
+
+            if (is_falsy) {
+                changed = true;
+                if (has_else) {
+                    size_t else_pos = skip_ws(search_str, after_stmt + 4);
+                    if (else_pos < search_str.size() && search_str[else_pos] == '{') {
+                        size_t else_close = find_matching_brace(search_str, else_pos);
+                        if (else_close != std::string::npos) {
+                            result += search_str.substr(else_pos + 1,
+                                                        else_close - else_pos - 1);
+                            search_str = search_str.substr(else_close + 1);
+                        } else {
+                            search_str = search_str.substr(stmt_end + 1);
+                        }
+                    } else {
+                        size_t else_stmt_end = find_statement_end(search_str, else_pos);
+                        if (else_stmt_end != std::string::npos) {
+                            result += search_str.substr(else_pos,
+                                                        else_stmt_end - else_pos + 1);
+                            search_str = search_str.substr(else_stmt_end + 1);
+                        } else {
+                            search_str = search_str.substr(stmt_end + 1);
+                        }
+                    }
+                } else {
+                    search_str = search_str.substr(stmt_end + 1);
+                }
+                continue;
+            }
+        }
+
+        result += m.str();
+        search_str = search_str.substr(match_end);
+    }
+
+    result += search_str;
+    return changed ? result : js;
+}
+
 static std::string fold_unary_not(const std::string& js) {
     // !true -> false, !false -> true, !0 -> true, !1 -> false
     std::string result = js;
@@ -264,8 +640,16 @@ std::string fold_constants_in_text(const std::string& js) {
         any_change = false;
         iterations++;
         
+        // Dead branch folding: if(false){}, if(true){}, while(false){}
+        std::string folded = fold_dead_branches(result);
+        if (folded != result) {
+            any_change = true;
+            result = std::move(folded);
+            continue;
+        }
+        
         // Numeric folding: 2+3 -> 5
-        std::string folded = fold_numeric_exprs(result);
+        folded = fold_numeric_exprs(result);
         if (folded != result) {
             any_change = true;
             result = std::move(folded);
