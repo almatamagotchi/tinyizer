@@ -2,6 +2,7 @@
 #include "serializer.h"
 #include "../util/frequency_map.h"
 #include "../parser/tokenizer.h"
+#include "../parser/js_parser.h"
 #include <algorithm>
 #include <set>
 #include <sstream>
@@ -71,6 +72,124 @@ static size_t strip_var_keywords(std::string& js) {
 
     return removed;
 }
+
+// ---- Strip orphan top-level assignments ----
+// After var stripping, a dead `var x = 1;` becomes `x = 1;` — an assignment
+// whose target is never read elsewhere. Scan top-level (depth 0) for
+// identifier = ...; patterns and remove the whole statement when the
+// identifier has no other occurrences in the script.
+static size_t strip_orphan_assignments(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    size_t removed = 0;
+    int depth = 0;
+
+    for (size_t pos = 0; pos < js.size(); ) {
+        char c = js[pos];
+
+        // Track brace depth
+        if (!inside_string(pos)) {
+            if (c == '{') depth++;
+            else if (c == '}') {
+                if (depth > 0) depth--;
+            }
+        }
+
+        // At top level, look for identifier = value;
+        if (depth == 0 && !inside_string(pos) && is_ident(c) &&
+            !std::isdigit(static_cast<unsigned char>(c))) {
+
+            size_t id_start = pos;
+            while (pos < js.size() && is_ident(js[pos])) pos++;
+            size_t id_end = pos;
+            if (id_end == id_start) { pos++; continue; }
+            std::string ident = js.substr(id_start, id_end - id_start);
+
+            // Skip whitespace
+            while (pos < js.size() && (js[pos] == ' ' || js[pos] == '\t')) pos++;
+
+            // Must be followed by '='
+            if (pos >= js.size() || js[pos] != '=' || inside_string(pos)) {
+                pos = id_end;
+                continue;
+            }
+
+            // Find statement end (semicolon at depth 0, outside strings)
+            size_t stmt_end = pos; // start from '='
+            int local_depth = 0;
+            while (stmt_end < js.size()) {
+                char sc = js[stmt_end];
+                if (!inside_string(stmt_end)) {
+                    if (sc == '{' || sc == '(') local_depth++;
+                    else if (sc == '}' || sc == ')') {
+                        if (local_depth > 0) local_depth--;
+                    }
+                    else if (sc == ';' && local_depth == 0) break;
+                }
+                stmt_end++;
+            }
+            if (stmt_end >= js.size()) { pos = id_end; continue; } // no semicolon
+
+            // Check if ident appears elsewhere in js (outside this statement)
+            bool appears_elsewhere = false;
+            for (size_t i = 0; i < js.size(); ) {
+                if (i >= id_start && i <= stmt_end) {
+                    i = stmt_end + 1;
+                    continue;
+                }
+                if (i + ident.size() > js.size()) break;
+                if (!inside_string(i) && js.compare(i, ident.size(), ident) == 0) {
+                    bool left_ok = (i == 0 || !is_ident(js[i - 1]));
+                    bool right_ok = (i + ident.size() >= js.size() || !is_ident(js[i + ident.size()]));
+                    if (left_ok && right_ok) {
+                        appears_elsewhere = true;
+                        break;
+                    }
+                }
+                i++;
+            }
+
+            if (!appears_elsewhere) {
+                // Skip leading whitespace before erasing
+                size_t erase_start = id_start;
+                while (erase_start > 0 && (js[erase_start - 1] == ' ' || js[erase_start - 1] == ';')) {
+                    if (js[erase_start - 1] == ';') {
+                        erase_start--;  // grab prior semicolon
+                        break;
+                    }
+                    erase_start--;
+                }
+                js.erase(erase_start, stmt_end + 1 - erase_start);
+                removed++;
+                pos = erase_start;
+                continue;
+            }
+
+            pos = stmt_end + 1;
+            continue;
+        }
+
+        pos++;
+    }
+
+    return removed;
+}
+
+// ---- Dead function detection after console stripping ----
 
 // ---- Dead function detection after console stripping ----
 // After strip_console_calls removes the last caller of a function,
@@ -853,7 +972,7 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
             std::vector<std::pair<size_t, size_t>> dead_ranges;
             if (si < doc.js_script_asts().size() && doc.js_script_asts()[si]) {
                 collect_dead_node_ranges(doc.js_script_asts()[si].get(),
-                                         doc.dead_js_names, opt_js, dead_ranges);
+                                          doc.dead_js_names, opt_js, dead_ranges);
                 if (config_.debug_dead_js) {
                     std::cerr << "--- debug-dead-js: script " << si << " ---\n";
                     std::cerr << "dead_js_names (" << doc.dead_js_names.size() << "): ";
@@ -868,7 +987,7 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
                     // Also dump AST source ranges
                     std::cerr << "--- AST dump ---\n";
                 }
-                if (!dead_ranges.empty()) {
+                 if (!dead_ranges.empty()) {
                     // Sort descending so erasures don't invalidate later indices
                     std::sort(dead_ranges.begin(), dead_ranges.end(),
                         [](const auto& a, const auto& b) { return a.first > b.first; });
@@ -885,9 +1004,10 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
                             erase_start--;
                         opt_js.erase(erase_start, erase_end - erase_start);
                     }
-                }
-            }
-        }
+                 }
+             }
+         }
+
 
         // Strip console.*() calls
         strip_console_calls(opt_js);
@@ -899,6 +1019,71 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // Strip 'var' keyword from top-level declarations (non-strict mode)
         // saves 4 bytes per global var: var x=1; → x=1;
         strip_var_keywords(opt_js);
+        // Strip orphan assignments: x=1; where x never appears elsewhere
+        strip_orphan_assignments(opt_js);
+
+        // ---- Cascading dead-code re-elimination ----
+        // After console stripping, function stripping, and var stripping,
+        // variables that were only read by now-removed dead code become
+        // dead themselves.  Re-parse + re-eliminate until convergence.
+        {
+            // Lambda to collect unreferenced names from a scope tree
+            auto collect_dead = [](const JSScope* scope,
+                                   std::unordered_set<std::string>& dead,
+                                   auto& self) -> void {
+                if (!scope) return;
+                for (const auto& [name, var] : scope->variables()) {
+                    if (var.is_declared && !var.is_referenced && !var.is_exported)
+                        dead.insert(name);
+                }
+                for (const auto& [name, fn] : scope->functions()) {
+                    if (!fn.is_referenced && !fn.is_exported)
+                        dead.insert(name);
+                }
+                for (const auto& child : scope->children())
+                    self(child.get(), dead, self);
+            };
+
+            JSScope fresh_root(JSScope::Kind::GLOBAL);
+            JSParser reparser;
+            int cascade_round = 0;
+            const int MAX_CASCADE = 5;
+
+            while (cascade_round < MAX_CASCADE) {
+                auto fresh_ast = reparser.parse(opt_js, &fresh_root);
+                if (!fresh_ast) break;
+
+                std::unordered_set<std::string> cascade_dead;
+                collect_dead(&fresh_root, cascade_dead, collect_dead);
+
+                if (cascade_dead.empty()) break;
+
+                std::vector<std::pair<size_t, size_t>> cascade_ranges;
+                collect_dead_node_ranges(fresh_ast.get(), cascade_dead,
+                                         opt_js, cascade_ranges);
+
+                if (cascade_ranges.empty()) break;
+
+                // Remove dead ranges (reverse order to preserve positions)
+                std::sort(cascade_ranges.begin(), cascade_ranges.end());
+                size_t shift = 0;
+                for (auto& [start, end] : cascade_ranges) {
+                    if (start < shift) start = 0; else start -= shift;
+                    if (end < shift) end = 0; else end -= shift;
+                    if (end > opt_js.size()) end = opt_js.size();
+                    opt_js.erase(start, end - start);
+                    shift += end - start;
+                }
+
+                // Strip var keywords from any newly-exposed top-level vars
+                strip_var_keywords(opt_js);
+                strip_orphan_assignments(opt_js);
+
+                // Reset fresh_root for next round (clears stale scope data)
+                fresh_root = JSScope(JSScope::Kind::GLOBAL);
+                cascade_round++;
+            }
+        }
         // Fold constant expressions
         opt_js = fold_constants_in_text(opt_js);
 
