@@ -89,21 +89,15 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     }
 
     // ---- Collect from JS ----
+    // all_declared_names() is recursive, so calling it on root collects
+    // everything. We do NOT descend into child scopes — that would double-count.
     if (doc.js_root_scope()) {
-        // Use the scope tree to collect all declared names
-        // We need to walk the scope tree
-        std::function<void(const JSScope*)> collect_scope = [&](const JSScope* scope) {
-            auto names = scope->all_declared_names();
-            for (auto name : names) {
-                if (!name.empty() && name.size() > 1) { // skip single-char names
-                    freq_map.record(name);
-                }
+        auto names = doc.js_root_scope()->all_declared_names();
+        for (auto name : names) {
+            if (!name.empty() && name.size() > 1) {
+                freq_map.record(name);
             }
-            for (const auto& child : scope->children()) {
-                collect_scope(child.get());
-            }
-        };
-        collect_scope(doc.js_root_scope());
+        }
     }
 
     // ---- Remove JS-touched classes from rename candidates ----
@@ -125,10 +119,23 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     // ---- Check if we have enough identifiers to squeeze ----
     if (freq_map.size() < 2) return false;
 
+    // ---- Collect actual HTML tag names present in the DOM ----
+    // A class/id that shares a name with an HTML tag is only risky to rename
+    // if that tag actually appears in the document. If <header> isn't in the
+    // markup, renaming .header is safe.
+    std::unordered_set<std::string_view> actual_html_tags;
+    if (doc.root()) {
+        doc.root()->walk([&](const DOMNode& node) {
+            if (node.type() == DOMNode::Type::ELEMENT) {
+                actual_html_tags.insert(node.tag_name());
+            }
+        });
+    }
+
     // ---- Build rename map ----
     // Two-tier safety: JS keywords/builtins are never renamed.
     // HTML element/attribute names are only skipped if they actually appear
-    // in this document's markup — a JS-only variable like 'name' is fair game.
+    // in this document's markup as actual tags AND as class/id names.
 
     auto by_freq = freq_map.sorted();
     size_t rank = 0;
@@ -145,11 +152,10 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         };
         if (JS_UNSAFE.count(name) > 0) continue;
 
-        // Skip HTML/CSS names that appear in the document: renaming a CSS class
-        // or HTML id that's actively used would break selectors and DOM lookups.
-        // But a JS-only variable that happens to share a reserved HTML attribute name
-        // (like 'name', 'value', 'title') is safe to rename since it doesn't appear
-        // in this document's markup.
+        // Skip a class/id that shares a reserved HTML tag/attribute name
+        // only if that tag is actually present in the document AND the name
+        // appears as a class/id. If the tag isn't in the markup, renaming
+        // the class/id is safe (e.g., renaming .header when <header> is absent).
         static const std::unordered_set<std::string_view> HTML_RESERVED = {
             "html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li",
             "table", "tr", "td", "th", "form", "input", "button", "select", "option",
@@ -160,7 +166,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
             "position", "top", "left", "right", "bottom", "font", "size", "text",
             "background", "width", "height", "min-width", "max-width", "overflow",
         };
-        if (HTML_RESERVED.count(name) > 0 && doc_html_css_names.count(name) > 0) continue;
+        if (HTML_RESERVED.count(name) > 0 && doc_html_css_names.count(name) > 0 && actual_html_tags.count(name) > 0) continue;
 
         if (name.size() <= 1) continue; // already minimal
         std::string short_name;
