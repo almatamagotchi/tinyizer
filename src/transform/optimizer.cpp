@@ -15,6 +15,63 @@ namespace tinyizer {
 static void scan_string_ranges_in_text(const std::string& text,
                                        std::vector<std::pair<size_t, size_t>>& ranges);
 
+// ---- Strip 'var' keyword from top-level declarations in non-strict mode ----
+// In non-strict mode, top-level `var x = 1` is equivalent to `x = 1` (global).
+// Removing the `var ` saves 4 bytes per declaration. Only strips at brace depth 0
+// (outside any {}) and when no "use strict" directive is present.
+static size_t strip_var_keywords(std::string& js) {
+    // Skip if strict mode directive is present
+    if (js.find("\"use strict\"") == 0 || js.find("'use strict'") == 0) return 0;
+
+    // Pre-scan string ranges to skip `var` inside strings
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    size_t removed = 0;
+    int depth = 0;
+
+    for (size_t pos = 0; pos < js.size(); ) {
+        char c = js[pos];
+
+        // Track brace depth (skip braces inside strings)
+        if (!inside_string(pos)) {
+            if (c == '{') depth++;
+            else if (c == '}') depth--;
+        }
+
+        // Check for "var " at top level (depth 0)
+        if (depth == 0 && !inside_string(pos) &&
+            js.compare(pos, 4, "var ") == 0) {
+
+            // Word boundary before "var" (prevent matching longer identifiers)
+            bool left_bound = (pos == 0 || !is_ident(js[pos - 1]));
+
+            if (left_bound) {
+                js.erase(pos, 4);  // remove "var "
+                removed++;
+                continue;  // don't advance pos — recheck this position
+            }
+        }
+
+        pos++;
+    }
+
+    return removed;
+}
+
 // ---- Dead function detection after console stripping ----
 // After strip_console_calls removes the last caller of a function,
 // that function becomes dead but dead_js has already run. This pass
@@ -839,6 +896,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // Strip functions that became unreferenced after console stripping
         // (e.g., greet() only called via console.log(greet("World")))
         strip_unreferenced_functions(opt_js);
+        // Strip 'var' keyword from top-level declarations (non-strict mode)
+        // saves 4 bytes per global var: var x=1; → x=1;
+        strip_var_keywords(opt_js);
         // Fold constant expressions
         opt_js = fold_constants_in_text(opt_js);
 
