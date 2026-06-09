@@ -41,6 +41,24 @@ static size_t strip_var_keywords(std::string& js) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
     };
 
+    // Check if pos points to "var " that is inside a for-loop initializer.
+    // Scans backwards from pos for "for(" or "for (" to confirm.
+    auto inside_for_init = [&](size_t pos) -> bool {
+        if (pos < 5) return false;           // need at least "for(v"
+        size_t p = pos - 1;
+        // skip whitespace between '(' and 'var'
+        while (p > 0 && (js[p] == ' ' || js[p] == '\t')) p--;
+        if (js[p] != '(') return false;      // need an open-paren before var
+        if (p < 3) return false;
+        // check for "for" before the '('
+        if (js.compare(p-3, 3, "for") == 0) {
+            // word boundary before "for"
+            size_t before = p - 3;
+            return (before == 0 || !is_ident(js[before-1]));
+        }
+        return false;
+    };
+
     size_t removed = 0;
     int depth = 0;
 
@@ -53,14 +71,20 @@ static size_t strip_var_keywords(std::string& js) {
             else if (c == '}') depth--;
         }
 
-        // Check for "var " at top level (depth 0)
-        if (depth == 0 && !inside_string(pos) &&
+        // Check for "var " at top level (depth 0) or inside for-loop init
+        if (!inside_string(pos) &&
             js.compare(pos, 4, "var ") == 0) {
 
-            // Word boundary before "var" (prevent matching longer identifiers)
-            bool left_bound = (pos == 0 || !is_ident(js[pos - 1]));
+            bool can_strip = false;
+            if (depth == 0) {
+                // top level — strip if left word boundary
+                can_strip = (pos == 0 || !is_ident(js[pos - 1]));
+            } else if (inside_for_init(pos)) {
+                // inside for(...) initializer at any depth
+                can_strip = true;
+            }
 
-            if (left_bound) {
+            if (can_strip) {
                 js.erase(pos, 4);  // remove "var "
                 removed++;
                 continue;  // don't advance pos — recheck this position
