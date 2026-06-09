@@ -3,12 +3,181 @@
 #include "../util/frequency_map.h"
 #include "../parser/tokenizer.h"
 #include <algorithm>
+#include <set>
 #include <sstream>
 #include <cctype>
 #include <cstring>
 #include <iostream>
 
 namespace tinyizer {
+
+// Forward declarations
+static void scan_string_ranges_in_text(const std::string& text,
+                                       std::vector<std::pair<size_t, size_t>>& ranges);
+
+// ---- Dead function detection after console stripping ----
+// After strip_console_calls removes the last caller of a function,
+// that function becomes dead but dead_js has already run. This pass
+// scans the text for function declarations with no remaining callers
+// and strips them. Handles the common case: console.log(fn("arg")).
+// Returns the number of functions removed.
+static size_t strip_unreferenced_functions(std::string& js) {
+    // Pre-scan string ranges so we can skip identifiers inside strings
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    // Helper: check if a position is inside a string
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    // Helper: is this character a valid identifier char?
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    // First pass: collect function declarations and their name positions
+    struct FnEntry {
+        std::string name;
+        size_t fn_pos;  // position of 'function' keyword
+        size_t name_pos; // position of the name
+        size_t body_open; // position of '{'
+        size_t body_close; // position of matching '}'
+        size_t end_pos; // one past '}'
+    };
+    std::vector<FnEntry> functions;
+
+    size_t pos = 0;
+    while (pos < js.size()) {
+        // Find "function" keyword
+        size_t kw = js.find("function", pos);
+        if (kw == std::string::npos) break;
+
+        // Make sure it's a keyword, not part of another identifier
+        if (kw > 0 && is_ident(js[kw - 1])) { pos = kw + 8; continue; }
+        if (kw + 8 < js.size() && is_ident(js[kw + 8])) { pos = kw + 8; continue; }
+
+        // Skip past "function" and any whitespace
+        size_t p = kw + 8;
+        while (p < js.size() && (js[p] == ' ' || js[p] == '\t' || js[p] == '\n' || js[p] == '\r'))
+            p++;
+
+        // Optional '*' for generator function
+        if (p < js.size() && js[p] == '*') {
+            p++;
+            while (p < js.size() && (js[p] == ' ' || js[p] == '\t' || js[p] == '\n' || js[p] == '\r'))
+                p++;
+        }
+
+        // Must be a named function (not anonymous after function expression context)
+        // We only care about function NAME ( ... )
+        if (p >= js.size()) { pos = kw + 8; continue; }
+        // Skip if anonymous
+        if (js[p] == '(' || js[p] == '[') { pos = kw + 8; continue; }
+
+        // Extract the name
+        size_t name_start = p;
+        while (p < js.size() && is_ident(js[p])) p++;
+        if (p == name_start) { pos = kw + 8; continue; }
+
+        std::string fname = js.substr(name_start, p - name_start);
+
+        // Skip past whitespace to '('
+        while (p < js.size() && (js[p] == ' ' || js[p] == '\t' || js[p] == '\n' || js[p] == '\r'))
+            p++;
+        if (p >= js.size() || js[p] != '(') { pos = kw + 8; continue; }
+
+        // Find matching '{'
+        p++; // skip '('
+        int paren_depth = 1;
+        while (p < js.size() && paren_depth > 0) {
+            if (js[p] == '(') paren_depth++;
+            else if (js[p] == ')') paren_depth--;
+            else if (js[p] == '"' || js[p] == '\'' || js[p] == '`') {
+                char q = js[p];
+                p++;
+                while (p < js.size() && js[p] != q) {
+                    if (js[p] == '\\') p++;
+                    p++;
+                }
+            }
+            p++;
+        }
+        // Skip whitespace to '{'
+        while (p < js.size() && (js[p] == ' ' || js[p] == '\t' || js[p] == '\n' || js[p] == '\r'))
+            p++;
+        if (p >= js.size() || js[p] != '{') { pos = kw + 8; continue; }
+
+        size_t body_open = p;
+        p++;
+        int brace_depth = 1;
+        while (p < js.size() && brace_depth > 0) {
+            if (js[p] == '{') brace_depth++;
+            else if (js[p] == '}') brace_depth--;
+            else if (js[p] == '"' || js[p] == '\'' || js[p] == '`') {
+                char q = js[p];
+                p++;
+                while (p < js.size() && js[p] != q) {
+                    if (js[p] == '\\') p++;
+                    p++;
+                }
+            }
+            if (brace_depth > 0) p++;
+        }
+        if (p >= js.size()) break;
+
+        size_t body_close = p;
+        size_t end_pos = p + 1;
+
+        functions.push_back({std::move(fname), kw, name_start, body_open, body_close, end_pos});
+        pos = end_pos;
+    }
+
+    if (functions.empty()) return 0;
+
+    // Second pass: for each function name, count occurrences in the ENTIRE text
+    // (excluding positions inside strings). Names with exactly 1 occurrence
+    // (only the declaration name) are dead.
+    std::set<std::string> dead_names;
+    for (const auto& fn : functions) {
+        size_t count = 0;
+        size_t sp = 0;
+        while ((sp = js.find(fn.name, sp)) != std::string::npos) {
+            // Check word boundaries
+            bool left_ok = (sp == 0 || !is_ident(js[sp - 1]));
+            bool right_ok = (sp + fn.name.size() >= js.size() || !is_ident(js[sp + fn.name.size()]));
+            if (left_ok && right_ok && !inside_string(sp)) {
+                count++;
+            }
+            sp += fn.name.size();
+        }
+        if (count == 1) {
+            dead_names.insert(fn.name);
+        }
+    }
+
+    if (dead_names.empty()) return 0;
+
+    // Third pass: remove dead functions in reverse order
+    size_t removed = 0;
+    for (auto it = functions.rbegin(); it != functions.rend(); ++it) {
+        if (dead_names.count(it->name) == 0) continue;
+
+        // Erase from "function" to after closing brace, plus trailing whitespace/semicolons
+        size_t end = it->end_pos;
+        while (end < js.size() && (js[end] == ' ' || js[end] == '\t' || js[end] == '\n' || js[end] == '\r' || js[end] == ';'))
+            end++;
+        js.erase(it->fn_pos, end - it->fn_pos);
+        removed++;
+    }
+
+    return removed;
+}
 
 // Strip console.*(…) calls from JS text.
 // Matches console.log/warn/error/info/debug/trace/table/time/timeEnd/group/groupEnd/assert/count/countReset/dir.
@@ -98,6 +267,114 @@ static size_t strip_console_calls(std::string& js) {
         js.erase(pos, end - pos);
         removed++;
         // Don't advance pos — continue from same position (now holding next text)
+    }
+    return removed;
+}
+
+// Strip function declarations that have empty bodies.
+// This catches functions that became empty after strip_console_calls removed
+// all body statements (e.g., function greet(){console.log("hi")} → function greet(){}).
+// Only removes traditional function declarations; arrow functions and methods are left
+// for the existing dead_js pass to handle on the next iteration.
+static size_t strip_empty_functions(std::string& js) {
+    size_t removed = 0;
+    size_t pos = 0;
+    while (pos < js.size()) {
+        // Find "function" keyword
+        size_t fn_pos = js.find("function", pos);
+        if (fn_pos == std::string::npos) break;
+        // Only match if "function" is at the start or preceded by whitespace/semicolon/newline
+        // (avoid matching inside identifiers like "myfunction")
+        if (fn_pos > 0 && (std::isalnum(js[fn_pos-1]) || js[fn_pos-1] == '_' || js[fn_pos-1] == '$')) {
+            pos = fn_pos + 1;
+            continue;
+        }
+        size_t after_fn = fn_pos + 8; // past "function"
+        // Skip whitespace to find function name
+        while (after_fn < js.size() && (js[after_fn] == ' ' || js[after_fn] == '\t'))
+            after_fn++;
+        // Must have a name (not anonymous)
+        if (after_fn >= js.size() || !std::isalpha(js[after_fn]) && js[after_fn] != '_' && js[after_fn] != '$') {
+            pos = fn_pos + 1;
+            continue;
+        }
+        // Skip name
+        while (after_fn < js.size() && (std::isalnum(js[after_fn]) || js[after_fn] == '_' || js[after_fn] == '$'))
+            after_fn++;
+        // Find opening paren
+        while (after_fn < js.size() && js[after_fn] != '(') {
+            if (js[after_fn] != ' ' && js[after_fn] != '\t') {
+                pos = fn_pos + 1;
+                goto next_iter;
+            }
+            after_fn++;
+        }
+        // Find matching close paren (handle nesting and strings)
+        {
+            size_t cp = after_fn + 1;
+            int depth = 1;
+            bool in_str = false;
+            char str_c = 0;
+            while (cp < js.size() && depth > 0) {
+                char c = js[cp];
+                if (in_str) {
+                    if (c == '\\') cp++;
+                    else if (c == str_c) in_str = false;
+                } else {
+                    if (c == '"' || c == '\'' || c == '`') { in_str = true; str_c = c; }
+                    else if (c == '(') depth++;
+                    else if (c == ')') depth--;
+                }
+                cp++;
+            }
+            if (depth != 0) { pos = fn_pos + 1; continue; }
+            after_fn = cp; // after closing paren
+        }
+        // Find opening brace
+        while (after_fn < js.size() && js[after_fn] != '{') {
+            if (js[after_fn] != ' ' && js[after_fn] != '\t' && js[after_fn] != '\n' && js[after_fn] != '\r') {
+                pos = fn_pos + 1;
+                goto next_iter;
+            }
+            after_fn++;
+        }
+        // Find matching close brace (handle strings and nested braces)
+        {
+            size_t cb = after_fn + 1;
+            int depth = 1;
+            bool in_str = false;
+            char str_c = 0;
+            bool body_has_content = false;
+            while (cb < js.size() && depth > 0) {
+                char c = js[cb];
+                if (in_str) {
+                    if (c == '\\') cb++;
+                    else if (c == str_c) in_str = false;
+                } else {
+                    if (c == '"' || c == '\'' || c == '`') { in_str = true; str_c = c; }
+                    else if (c == '{') depth++;
+                    else if (c == '}') depth--;
+                    else if (depth == 1 && c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != ';') {
+                        // Non-whitespace, non-semicolon content in the body → not empty
+                        body_has_content = true;
+                    }
+                }
+                cb++;
+            }
+            if (depth != 0) { pos = fn_pos + 1; continue; }
+            if (body_has_content) { pos = fn_pos + 1; continue; }
+            // Body is empty — erase from "function" to after closing brace
+            size_t end = cb; // one past closing brace
+            // Include trailing whitespace/semicolons/newlines
+            while (end < js.size() && (js[end] == ' ' || js[end] == '\t' || js[end] == '\n' || js[end] == '\r' || js[end] == ';'))
+                end++;
+            js.erase(fn_pos, end - fn_pos);
+            removed++;
+            // Don't advance pos — stay at fn_pos for next iteration
+            continue;
+        }
+        next_iter:
+        pos = fn_pos + 1;
     }
     return removed;
 }
@@ -557,6 +834,11 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
 
         // Strip console.*() calls
         strip_console_calls(opt_js);
+        // Strip functions that became empty after console call removal
+        strip_empty_functions(opt_js);
+        // Strip functions that became unreferenced after console stripping
+        // (e.g., greet() only called via console.log(greet("World")))
+        strip_unreferenced_functions(opt_js);
         // Fold constant expressions
         opt_js = fold_constants_in_text(opt_js);
 
@@ -728,12 +1010,57 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                                 }
                             }
                         }
+                        // Optimize viewport meta content: fold numeric values like "1.0" -> "1"
+                        std::string_view opt_val = attr.value;
+                        std::string opt_buf;
+                        if (node.tag_name() == "meta" && attr.name == "content") {
+                            // Check if this is a viewport meta
+                            bool is_viewport = false;
+                            for (const auto& a : node.attrs()) {
+                                if (a.name == "name" && a.value == "viewport") {
+                                    is_viewport = true;
+                                    break;
+                                }
+                            }
+                            if (is_viewport) {
+                                // Fold trailing zeros in numeric values: "1.0" -> "1", "1.50" -> "1.5"
+                                opt_buf = attr.value;
+                                size_t pos = 0;
+                                while (pos < opt_buf.size()) {
+                                    if (is_digit(opt_buf[pos]) && (pos == 0 || !is_ident_char(opt_buf[pos-1]))) {
+                                        size_t dstart = pos;
+                                        while (pos < opt_buf.size() && is_digit(opt_buf[pos])) pos++;
+                                        if (pos < opt_buf.size() && opt_buf[pos] == '.') {
+                                            size_t dot = pos;
+                                            pos++;
+                                            size_t frac_start = pos;
+                                            while (pos < opt_buf.size() && is_digit(opt_buf[pos])) pos++;
+                                            // Strip trailing zeros from fractional part
+                                            size_t frac_end = pos;
+                                            while (frac_end > frac_start && opt_buf[frac_end - 1] == '0') frac_end--;
+                                            if (frac_end == frac_start) {
+                                                // All fractional digits are zero -> remove dot and fractional part
+                                                opt_buf.erase(dot, pos - dot);
+                                                pos = dot;
+                                            } else if (frac_end < pos) {
+                                                // Some trailing zeros removed
+                                                opt_buf.erase(frac_end, pos - frac_end);
+                                                pos = frac_end;
+                                            }
+                                        }
+                                    } else {
+                                        pos++;
+                                    }
+                                }
+                                opt_val = opt_buf;
+                            }
+                        }
                         if (safe_unquoted) {
                             out += '=';
-                            out += attr.value;
+                            out += opt_val;
                         } else {
                             out += "=\"";
-                            out += attr.value;
+                            out += opt_val;
                             out += '"';
                         }
                     } else if (!attr.value.empty()) {

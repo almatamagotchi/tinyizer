@@ -242,6 +242,25 @@ std::string minify_css_value(const std::string& value) {
             }
         }
 
+        // Named color → hex when shorter
+        if (is_ident_char(value[i]) && !is_digit(value[i]) &&
+            (i == 0 || !is_ident_char(value[i-1]))) {
+            size_t token_end = i;
+            while (token_end < value.size() && is_ident_char(value[token_end])) token_end++;
+            std::string_view token = std::string_view(value).substr(i, token_end - i);
+            // Map named colors to 3-digit hex when the hex form is shorter
+            static const std::unordered_map<std::string_view, std::string_view> NAMED_TO_HEX = {
+                {"white","#fff"}, {"black","#000"}, {"yellow","#ff0"},
+                {"fuchsia","#f0f"}, {"magenta","#f0f"},
+            };
+            auto nc = NAMED_TO_HEX.find(token);
+            if (nc != NAMED_TO_HEX.end() && nc->second.size() < token.size()) {
+                result += nc->second;
+                i = token_end;
+                continue;
+            }
+        }
+
         // Check for "0px", "0em", "0%", etc. — remove unit from zero
         if (value[i] == '0' && (i == 0 || !is_digit(value[i-1]))) {
             size_t end = i + 1;
@@ -270,8 +289,27 @@ std::string minify_css_value(const std::string& value) {
             continue;
         }
 
-        // Check for "1.0" -> "1"
-        // (simplified — skip for now)
+        // Check for "X.0" -> "X" — trailing zero removal
+        // e.g., "1.0" -> "1", "2.00" -> "2", "10.0" -> "10"
+        if (is_digit(value[i]) && (i == 0 || !is_ident_char(value[i-1]))) {
+            size_t j = i;
+            while (j < value.size() && is_digit(value[j])) j++;
+            if (j < value.size() && value[j] == '.') {
+                size_t k = j + 1;
+                while (k < value.size() && is_digit(value[k])) k++;
+                // Check if all digits after the dot are zeros
+                bool all_zeros = true;
+                for (size_t z = j + 1; z < k; z++) {
+                    if (value[z] != '0') { all_zeros = false; break; }
+                }
+                if (all_zeros && k > j + 1) {
+                    // Copy just the integer part
+                    for (size_t z = i; z < j; z++) result += value[z];
+                    i = k;
+                    continue;
+                }
+            }
+        }
 
         // Remove unnecessary whitespace
         if (is_whitespace(value[i])) {
