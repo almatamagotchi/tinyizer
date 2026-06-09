@@ -1162,6 +1162,9 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
             bool is_implicit = (node.tag_name() == "html" ||
                                node.tag_name() == "head" ||
                                node.tag_name() == "body");
+            // For style/script elements, use optimized content instead of text children
+            bool is_style = (node.tag_name() == std::string_view("style"));
+            bool is_script = (node.tag_name() == std::string_view("script"));
             // HTML5 optional END tags (but start tag required):
             // li, dt, dd, p, rt, rp, optgroup, option, colgroup,
             // thead, tbody, tfoot, tr, td, th
@@ -1199,6 +1202,12 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                 }
             }
             if (!is_root && !is_implicit) {
+                // Skip empty <script> elements (all JS was dead/minified away)
+                if (is_script && script_idx < (int)doc.optimized_js.size() &&
+                    doc.optimized_js[script_idx].empty()) {
+                    script_idx++;
+                    return;
+                }
                 out += '<';
                 out += node.tag_name();
 
@@ -1330,8 +1339,6 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                 }
 
                 // For style/script elements, use optimized content instead of text children
-                bool is_style = (node.tag_name() == std::string_view("style"));
-                bool is_script = (node.tag_name() == std::string_view("script"));
 
                 if (is_style && style_idx < (int)doc.optimized_css.size()) {
                     out += '>';
