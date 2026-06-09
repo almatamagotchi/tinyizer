@@ -17,9 +17,10 @@ static void scan_string_ranges_in_text(const std::string& text,
                                        std::vector<std::pair<size_t, size_t>>& ranges);
 
 // ---- Strip 'var' keyword from top-level declarations in non-strict mode ----
-// In non-strict mode, top-level `var x = 1` is equivalent to `x = 1` (global).
-// Removing the `var ` saves 4 bytes per declaration. Only strips at brace depth 0
-// (outside any {}) and when no "use strict" directive is present.
+// In non-strict mode, `var x = 1` is equivalent to `x = 1` (outside strict).
+// Removing the `var ` saves 4 bytes per declaration. Strips at brace depth 0
+// (top‑level global), inside for‑loop initializers, and inside function scopes
+// when the declaration is single‑variable (no comma‑separated multi‑decl).
 static size_t strip_var_keywords(std::string& js) {
     // Skip if strict mode directive is present
     if (js.find("\"use strict\"") == 0 || js.find("'use strict'") == 0) return 0;
@@ -39,6 +40,23 @@ static size_t strip_var_keywords(std::string& js) {
 
     auto is_ident = [](char c) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    // Check whether a var declaration starting at pos (after "var ") contains
+    // a comma before its terminating semicolon — if so, it's a multi‑decl like
+    // `var a=1,b=2;` and we cannot safely strip `var `.
+    auto is_single_decl = [&](size_t scan_start) -> bool {
+        int paren_depth = 0;
+        for (size_t i = scan_start; i < js.size(); i++) {
+            if (inside_string(i)) continue;
+            char ch = js[i];
+            if (ch == '(') paren_depth++;
+            else if (ch == ')') { if (paren_depth > 0) paren_depth--; }
+            else if (ch == ';' && paren_depth == 0) return true;   // single decl
+            else if (ch == ',' && paren_depth == 0) return false;  // multi‑decl
+            else if (ch == '{' || ch == '}') return false;          // hit block — bail
+        }
+        return true; // end of input — treat as single decl
     };
 
     // Check if pos points to "var " that is inside a for-loop initializer.
@@ -71,7 +89,8 @@ static size_t strip_var_keywords(std::string& js) {
             else if (c == '}') depth--;
         }
 
-        // Check for "var " at top level (depth 0) or inside for-loop init
+        // Check for "var " at top level (depth 0), inside for-loop init,
+        // or inside function scope with a single-decl (no comma).
         if (!inside_string(pos) &&
             js.compare(pos, 4, "var ") == 0) {
 
@@ -82,6 +101,9 @@ static size_t strip_var_keywords(std::string& js) {
             } else if (inside_for_init(pos)) {
                 // inside for(...) initializer at any depth
                 can_strip = true;
+            } else if (depth > 0 && is_single_decl(pos + 4)) {
+                // inside function scope, single-variable declaration
+                can_strip = (pos == 0 || !is_ident(js[pos - 1]));
             }
 
             if (can_strip) {
@@ -211,6 +233,235 @@ static size_t strip_orphan_assignments(std::string& js) {
     }
 
     return removed;
+}
+
+// ---- Inline single-use top-level variables ----
+// If a top-level variable assignment has a literal RHS and the variable
+// is referenced exactly once outside the assignment, replace the reference
+// with the literal value and strip the assignment. This enables cascading
+// dead-code removal when the now-unused variable gets cleaned up.
+//
+// e.g., f="World";function d(c){...}d(f); → function d(c){...}d("World");
+//       (f had exactly 2 occurrences: the assignment and d(f))
+static size_t inline_single_use_variables(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    auto is_literal_char = [](char c) {
+        return c == '"' || c == '\'' || c == '`'
+            || std::isdigit(static_cast<unsigned char>(c))
+            || c == '-' || c == 't' || c == 'f' || c == 'n';
+    };
+
+    auto extract_literal = [&](size_t rhs_start, size_t rhs_end) -> std::string {
+        // Trim whitespace
+        while (rhs_start < rhs_end && (js[rhs_start] == ' ' || js[rhs_start] == '\t'))
+            rhs_start++;
+        while (rhs_end > rhs_start && (js[rhs_end-1] == ' ' || js[rhs_end-1] == '\t'))
+            rhs_end--;
+        if (rhs_start >= rhs_end) return "";
+
+        // String literal: "...", '...', or `...` (simple template, no interpolation)
+        if (js[rhs_start] == '"' || js[rhs_start] == '\'' || js[rhs_start] == '`') {
+            char q = js[rhs_start];
+            size_t p = rhs_start + 1;
+            while (p < rhs_end) {
+                if (js[p] == '\\') { p += 2; continue; }
+                if (js[p] == q) {
+                    // Found closing quote — must be end of RHS
+                    if (p + 1 == rhs_end ||
+                        (p + 1 < rhs_end && js[p + 1] == ' ')) {
+                        return js.substr(rhs_start, p + 1 - rhs_start);
+                    }
+                }
+                p++;
+            }
+        }
+
+        // Number: digits, optionally with . and leading -
+        {
+            size_t p = rhs_start;
+            if (js[p] == '-') p++;
+            bool has_digit = false;
+            while (p < rhs_end && std::isdigit(static_cast<unsigned char>(js[p])))
+                { has_digit = true; p++; }
+            if (p < rhs_end && js[p] == '.') {
+                p++;
+                while (p < rhs_end && std::isdigit(static_cast<unsigned char>(js[p])))
+                    p++;
+            }
+            if (has_digit && p == rhs_end)
+                return js.substr(rhs_start, rhs_end - rhs_start);
+        }
+
+        // Boolean / null / undefined
+        std::string_view token(js.data() + rhs_start, rhs_end - rhs_start);
+        if (token == "true" || token == "false" || token == "null" || token == "undefined")
+            return js.substr(rhs_start, rhs_end - rhs_start);
+
+        return "";  // not a simple literal
+    };
+
+    size_t inlined = 0;
+    size_t pos = 0;
+
+    while (pos < js.size()) {
+        // Skip to next top-level ident assignment
+        // (simplified: find '=' at depth 0, check left-side ident, right-side literal)
+        // We use a similar scan to strip_orphan_assignments but looking for 2-occurrence vars
+
+        // Find next '=' at depth 0 outside strings
+        size_t eq_pos = std::string::npos;
+        int depth = 0;
+        for (size_t i = pos; i < js.size(); i++) {
+            if (!inside_string(i)) {
+                if (js[i] == '{') depth++;
+                else if (js[i] == '}') { if (depth > 0) depth--; }
+                else if (js[i] == '=' && depth == 0) {
+                    eq_pos = i;
+                    break;
+                }
+            }
+        }
+        if (eq_pos == std::string::npos) break;
+
+        // Walk left to find identifier start
+        size_t id_end = eq_pos;
+        while (id_end > 0 && (js[id_end - 1] == ' ' || js[id_end - 1] == '\t'))
+            id_end--;
+        if (id_end == 0) { pos = eq_pos + 1; continue; }
+
+        size_t id_start = id_end;
+        while (id_start > 0 && is_ident(js[id_start - 1]))
+            id_start--;
+        if (id_start == id_end) { pos = eq_pos + 1; continue; }
+
+        std::string ident = js.substr(id_start, id_end - id_start);
+
+        // Check left word boundary
+        if (id_start > 0 && is_ident(js[id_start - 1])) { pos = eq_pos + 1; continue; }
+        // Check the ident is at top level (check the start of ident is at depth 0)
+        {
+            int d = 0;
+            for (size_t i = id_start; i > 0; ) {
+                i--;
+                if (!inside_string(i)) {
+                    if (js[i] == '}') d++;
+                    else if (js[i] == '{') {
+                        if (d > 0) d--;
+                        else { d = 1; break; } // opened a brace before closing → inside block
+                    }
+                }
+            }
+            if (d != 0) { pos = eq_pos + 1; continue; } // not top level
+        }
+
+        // Walk right from '=' to find RHS end (semicolon at depth 0)
+        size_t rhs_start = eq_pos + 1;
+        size_t stmt_end = rhs_start;
+        int local_depth = 0;
+        while (stmt_end < js.size()) {
+            char sc = js[stmt_end];
+            if (!inside_string(stmt_end)) {
+                if (sc == '{' || sc == '(') local_depth++;
+                else if (sc == '}' || sc == ')') {
+                    if (local_depth > 0) local_depth--;
+                }
+                else if (sc == ';' && local_depth == 0) break;
+            }
+            stmt_end++;
+        }
+        if (stmt_end >= js.size()) { pos = eq_pos + 1; continue; }
+
+        // Extract the literal value
+        std::string literal = extract_literal(rhs_start, stmt_end);
+        if (literal.empty()) { pos = stmt_end + 1; continue; }
+
+        // Count total occurrences of ident (word-boundary, outside strings)
+        size_t read_pos = std::string::npos;
+        size_t count = 0;
+        for (size_t i = 0; i < js.size(); ) {
+            if (i + ident.size() > js.size()) break;
+            if (inside_string(i)) { i++; continue; }
+            if (js.compare(i, ident.size(), ident) != 0) { i++; continue; }
+            bool left_ok = (i == 0 || !is_ident(js[i - 1]));
+            bool right_ok = (i + ident.size() >= js.size() || !is_ident(js[i + ident.size()]));
+            if (!left_ok || !right_ok) { i += ident.size(); continue; }
+
+            // Check this isn't part of `ident =` or `ident=` (skip the assignment position)
+            size_t after = i + ident.size();
+            while (after < js.size() && (js[after] == ' ' || js[after] == '\t')) after++;
+            if (after < js.size() && js[after] == '=') {
+                // This is the assignment, not a read
+                i += ident.size();
+                continue;
+            }
+
+            // This is a read. Record position if it's the only non-assignment occurrence.
+            count++;
+            if (read_pos == std::string::npos) read_pos = i;
+            i += ident.size();
+        }
+
+        // We need exactly 1 read occurrence (the assignment is the other)
+        if (count != 1) { pos = stmt_end + 1; continue; }
+
+        // Before inlining, check that the read is not inside a for-loop header, etc.
+        // (The read should be an expression context, not assignment target)
+        // Simple check: read_pos must not be immediately followed by '=' after skipping ws
+        {
+            size_t after = read_pos + ident.size();
+            while (after < js.size() && (js[after] == ' ' || js[after] == '\t')) after++;
+            if (after < js.size() && (js[after] == '=' || js[after] == ':')) {
+                // Variable is being assigned to, not read — skip
+                pos = stmt_end + 1;
+                continue;
+            }
+            // Also check left side — shouldn't be part of 'var' or 'let' or 'const'
+            // but we already checked top-level, so this is unlikely
+        }
+
+        // Check for function/member context: foo.bar = ident  (not a problem)
+        // Just avoid inlining when the read is in a delete statement or similar risk
+
+        // --- Perform the inlining ---
+        // Replace the read occurrence with the literal value
+        js.replace(read_pos, ident.size(), literal);
+
+        // Adjust positions if replacement shifted things
+        size_t shift = literal.size() - ident.size();
+
+        // Remove the assignment statement
+        size_t erase_start = id_start;
+        while (erase_start > 0 && (js[erase_start - 1] == ' ' || js[erase_start - 1] == ';')) {
+            if (js[erase_start - 1] == ';') { erase_start--; break; }
+            erase_start--;
+        }
+        size_t erase_len = (stmt_end + 1) - erase_start;
+        if (read_pos > stmt_end) {
+            // Read was after the assignment — adjust read_pos for the erase
+            read_pos -= erase_len;
+        }
+        js.erase(erase_start, erase_len);
+
+        inlined++;
+        pos = erase_start;
+    }
+
+    return inlined;
 }
 
 // ---- Dead function detection after console stripping ----
@@ -1044,6 +1295,12 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // saves 4 bytes per global var: var x=1; → x=1;
         strip_var_keywords(opt_js);
         // Strip orphan assignments: x=1; where x never appears elsewhere
+        strip_orphan_assignments(opt_js);
+        // Inline single-use top-level variable references whose RHS is a literal.
+        // e.g., f="World";d(f); → d("World"); — the orphan pass then removes f=...;
+        inline_single_use_variables(opt_js);
+        // Re-run orphan removal: inlining may have left the declaration orphaned
+        // (but inline removes it directly, so this is a safety net for edge cases)
         strip_orphan_assignments(opt_js);
 
         // ---- Cascading dead-code re-elimination ----
