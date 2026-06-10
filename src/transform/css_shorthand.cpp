@@ -1149,7 +1149,7 @@ bool Optimizer::pass_css_math_fold(UnifiedDocument& doc) {
                 // Format the result
                 // Strip trailing zeros from the fractional part
                 char buf[64];
-                snprintf(buf, sizeof(buf), "%g", result_num);
+                 snprintf(buf, sizeof(buf), "%.17g", result_num);
                 std::string num_str(buf);
                 // Handle "0." — if just "0", keep it
                 // Append unit

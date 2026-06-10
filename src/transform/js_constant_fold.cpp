@@ -52,7 +52,14 @@ static std::string eval_binary(const std::string& left, const std::string& op, c
     if (result == static_cast<long long>(result)) {
         return std::to_string(static_cast<long long>(result));
     }
-    return std::to_string(result);
+    // Use %g to strip trailing zeros: 0.750000 -> 0.75
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.17g", result);
+    std::string s(buf);
+    // Ensure the result doesn't look like an integer when it's fractional:
+    // "0.5" is fine; "0" for 0.0 is fine too.
+    // But "1e-7" might lose the leading-zero idiom... keep scientific notation.
+    return s;
 }
 
 static std::string fold_numeric_exprs(const std::string& js) {
