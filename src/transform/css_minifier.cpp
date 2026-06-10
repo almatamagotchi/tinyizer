@@ -45,6 +45,45 @@ bool Optimizer::pass_css_minify(UnifiedDocument& doc) {
                 }
             }
 
+            // Strip unnecessary quotes from font-family names
+            // "Arial" → Arial, 'Georgia' → Georgia (saves 2 bytes)
+            // Safe when the name contains no special characters and isn't a CSS keyword
+            if (decl.property == std::string_view("font-family")) {
+                std::string_view v = decl.value;
+                if (v.size() >= 2 && (v.front() == '"' || v.front() == '\'')) {
+                    char quote = v.front();
+                    if (v.back() == quote) {
+                        std::string_view inner(v.data() + 1, v.size() - 2);
+                        // Don't strip if: empty, contains whitespace/commas/slashes,
+                        // starts with digit/hyphen-digit, or is a CSS generic family.
+                        bool safe = !inner.empty();
+                        for (char c : inner) {
+                            if (c == ' ' || c == ',' || c == '/' || c == '\\')
+                                safe = false;
+                        }
+                        // Must not start with digit or hyphen-digit
+                        if (safe && (isdigit(inner[0]) ||
+                            (inner[0] == '-' && inner.size() > 1 && isdigit(inner[1]))))
+                            safe = false;
+                        // Must not be a CSS generic family keyword
+                        if (safe) {
+                            static const std::unordered_set<std::string_view> GENERIC = {
+                                "serif", "sans-serif", "monospace", "cursive", "fantasy",
+                                "system-ui", "ui-serif", "ui-sans-serif", "ui-monospace",
+                                "ui-rounded", "math", "emoji", "fangsong", "initial", "inherit",
+                                "unset", "revert", "revert-layer"
+                            };
+                            if (GENERIC.count(inner))
+                                safe = false;
+                        }
+                        if (safe) {
+                            decl.value = doc.string_pool().intern(inner);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
             // Map "none" → "0" for border/outline shorthands (equivalent rendering, saves 2 chars)
             // Safe: border:0 sets width to 0, same visual result as border:none
             // Not applied to border-style sub-properties — "0" is not a valid style value
