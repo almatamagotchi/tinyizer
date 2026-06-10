@@ -410,10 +410,11 @@ std::string minify_css_value(const std::string& value) {
                 {"slategray","#708090"},{"slategrey","#708090"},{"snow","#fffafa"},
                 {"springgreen","#00ff7f"},{"steelblue","#4682b4"},{"tan","#d2b48c"},
                 {"teal","#008080"},{"thistle","#d8bfd8"},{"tomato","#ff6347"},
-                {"turquoise","#40e0d0"},{"violet","#ee82ee"},{"wheat","#f5deb3"},
-                {"white","#fff"},{"whitesmoke","#f5f5f5"},{"yellow","#ff0"},
-                {"yellowgreen","#9acd32"},
-            };
+                 {"turquoise","#40e0d0"},{"violet","#ee82ee"},{"wheat","#f5deb3"},
+                 {"white","#fff"},{"whitesmoke","#f5f5f5"},{"yellow","#ff0"},
+                 {"yellowgreen","#9acd32"},
+                 {"transparent","#0000"},
+             };
             auto nc = NAMED_TO_HEX.find(token);
             if (nc != NAMED_TO_HEX.end() && nc->second.size() < token.size()) {
                 result += nc->second;
