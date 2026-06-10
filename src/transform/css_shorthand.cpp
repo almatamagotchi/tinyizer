@@ -66,6 +66,24 @@ std::string minify_css_value(const std::string& value) {
     // Minify numbers: 0px -> 0, 0.5 -> .5, 1.0 -> 1
     // Minify keyword values where shorter form exists
 
+    // Strip unnecessary calc() wrapper: calc(100%) → 100%, calc(var(--x)) → var(--x)
+    if (value.size() > 6 && value.substr(0,5) == "calc(" && value.back() == ')') {
+        std::string inner = value.substr(5, value.size() - 6);
+        bool is_simple = true;
+        int depth = 0;
+        for (size_t k = 0; k < inner.size() && is_simple; k++) {
+            char ck = inner[k];
+            if (ck == '(') depth++;
+            else if (ck == ')') { if (depth == 0) is_simple = false; else depth--; }
+            else if (ck == '+' || ck == '-' || ck == '*' || ck == '/') {
+                if (ck != '-' || (k > 0 && inner[k-1] != 'e' && inner[k-1] != 'E')) is_simple = false;
+            }
+        }
+        if (is_simple && depth == 0) {
+            return minify_css_value(inner);
+        }
+    }
+
     size_t i = 0;
     while (i < value.size()) {
         // Check for hex color
