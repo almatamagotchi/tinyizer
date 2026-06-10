@@ -1463,16 +1463,50 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
             // or is the last child of its parent (no more content).
             bool can_omit_end = false;
             if (!is_implicit && !is_root) {
-                static const std::unordered_set<std::string_view> omit_end_set = {
-                    "li", "dt", "dd", "p", "rt", "rp", "optgroup", "option",
-                    "colgroup", "thead", "tbody", "tfoot", "tr", "td", "th"
+                // HTML5 optional end tag rules per element.
+                // Most common case: same-tag sibling or last child.
+                // Some elements also omit before different sibling tags.
+                static const std::unordered_map<std::string_view, std::vector<std::string_view>> omit_rules = {
+                    // Same-tag or last-child only:
+                    {"li", {}},
+                    {"rt", {}},
+                    {"rp", {}},
+                    {"thead", {}},
+                    {"tbody", {}},
+                    {"tfoot", {}},
+                    {"tr", {}},
+                    {"td", {}},
+                    {"th", {}},
+                    // dt omits before another dt OR dd:
+                    {"dt", {"dd"}},
+                    // dd omits before another dd OR dt:
+                    {"dd", {"dt"}},
+                    // option omits before option or optgroup:
+                    {"option", {"optgroup"}},
+                    // optgroup omits before another optgroup:
+                    {"optgroup", {}},
+                    // colgroup omits before colgroup, tbody, or thead:
+                    {"colgroup", {"tbody", "thead"}},
+                    // caption omits when not followed by more content or when next
+                    // element follows (no whitespace/comments in minified output):
+                    {"caption", {"thead", "tbody", "tfoot", "tr", "colgroup"}},
+                    // p omits before p, or any block-level element (address, article,
+                    // aside, blockquote, details, div, dl, fieldset, figcaption,
+                    // figure, footer, form, h1-h6, header, hgroup, hr, main, menu,
+                    // nav, ol, pre, section, table, ul):
+                    {"p", {
+                        "address", "article", "aside", "blockquote", "details",
+                        "div", "dl", "fieldset", "figcaption", "figure", "footer",
+                        "form", "h1", "h2", "h3", "h4", "h5", "h6",
+                        "header", "hgroup", "hr", "main", "menu", "nav",
+                        "ol", "pre", "section", "table", "ul"
+                    }},
                 };
-                if (omit_end_set.count(node.tag_name())) {
-                    // Check if this is the last child or next sibling has same tag
+                auto it = omit_rules.find(node.tag_name());
+                if (it != omit_rules.end()) {
                     const DOMNode* parent = node.parent();
                     if (parent) {
                         const auto& siblings = parent->children();
-                        // Find this node's index in siblings
                         size_t my_idx = 0;
                         for (; my_idx < siblings.size(); ++my_idx) {
                             if (siblings[my_idx].get() == &node) break;
@@ -1481,12 +1515,17 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                             // Last child — end tag can be omitted
                             can_omit_end = true;
                         } else {
-                            // Check next sibling's tag
                             const auto* next = siblings[my_idx + 1].get();
-                            if (next && next->type() == DOMNode::Type::ELEMENT &&
-                                next->tag_name() == node.tag_name()) {
-                                // Next sibling is same type — end tag can be omitted
-                                can_omit_end = true;
+                            if (next && next->type() == DOMNode::Type::ELEMENT) {
+                                std::string_view tag = next->tag_name();
+                                if (tag == node.tag_name()) {
+                                    can_omit_end = true;
+                                } else {
+                                    // Check cross-tag allowance list
+                                    for (auto& allowed : it->second) {
+                                        if (tag == allowed) { can_omit_end = true; break; }
+                                    }
+                                }
                             }
                         }
                     }
