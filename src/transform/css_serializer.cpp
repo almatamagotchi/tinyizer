@@ -2,8 +2,77 @@
 #include "../parser/tokenizer.h"
 #include <sstream>
 #include <algorithm>
+#include <cctype>
+#include <unordered_set>
 
 namespace tinyizer {
+
+// CSS generic family names and reserved keywords that MUST be quoted
+// if used as a font-family name (we must NOT unquote these).
+static const std::unordered_set<std::string> FONT_FAMILY_RESERVED = {
+    "serif", "sans-serif", "monospace", "cursive", "fantasy",
+    "system-ui", "ui-serif", "ui-sans-serif", "ui-monospace",
+    "ui-rounded", "math", "emoji", "fangsong",
+    "inherit", "initial", "unset", "revert", "none", "normal"
+};
+
+// Check if a character is valid in an unquoted font-family name.
+// Allowed: letters, digits, hyphens (but not leading), spaces are NOT allowed.
+static bool is_font_family_name_char(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+}
+
+// Strip unnecessary quotes from font-family values.
+// "Arial" -> Arial, 'Georgia' -> Georgia, "Arial","Helvetica" -> Arial,Helvetica
+// Only unquotes when the inner name contains no spaces or special chars
+// and is not a CSS reserved keyword.
+static std::string strip_font_family_quotes(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+
+    for (size_t i = 0; i < value.size(); i++) {
+        char c = value[i];
+
+        // Check for quoted string
+        if (c == '"' || c == '\'') {
+            char quote_char = c;
+            size_t j = i + 1;
+            while (j < value.size() && value[j] != quote_char) {
+                if (value[j] == '\\') j++; // skip escaped char
+                j++;
+            }
+
+            if (j < value.size() && value[j] == quote_char) {
+                // Extract inner name
+                std::string inner = value.substr(i + 1, j - i - 1);
+
+                // Check if inner is valid as unquoted
+                bool valid = !inner.empty();
+                for (char ch : inner) {
+                    if (!is_font_family_name_char(ch)) { valid = false; break; }
+                }
+
+                // Must not match a reserved keyword (case-insensitive for generic families)
+                if (valid) {
+                    std::string lower;
+                    lower.reserve(inner.size());
+                    for (char ch : inner) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    if (FONT_FAMILY_RESERVED.count(lower)) valid = false;
+                }
+
+                if (valid) {
+                    result += inner;
+                    i = j;
+                    continue;
+                }
+            }
+        }
+
+        result += c;
+    }
+
+    return result;
+}
 
 // Serialize a list of CSS rules to a minified string
 std::string serialize_css(const std::vector<CSSRule>& rules) {
@@ -64,7 +133,12 @@ std::string serialize_css(const std::vector<CSSRule>& rules) {
             first_decl = false;
             out += decl.property;
             out += ':';
-            out += minify_css_value(std::string(decl.value));
+            std::string val(decl.value);
+            // Strip unnecessary quotes from font-family values
+            if (decl.property == "font-family") {
+                val = strip_font_family_quotes(val);
+            }
+            out += minify_css_value(val);
             if (decl.important) out += "!important";
         }
 
@@ -276,6 +350,7 @@ std::string tinyizer::minify_css_text(const std::string& css) {
         size_t depth = 0; // brace depth: 0 = selector, 1+ = inside decl block
         bool in_str = false;
         char str_delim = 0;
+        std::string last_property; // track property name for property-aware value opts
 
         for (size_t i = 0; i < out.size(); i++) {
             char c = out[i];
@@ -302,8 +377,25 @@ std::string tinyizer::minify_css_text(const std::string& css) {
             if (c == '{') { depth++; result += c; continue; }
             if (c == '}') { if (depth > 0) depth--; result += c; continue; }
 
-            // Inside a declaration block, ':' separates property from value
+            // Inside a declaration block, track property names before ':'
+            // and ':' separates property from value
             if (depth > 0 && c == ':') {
+                // Extract the property name (everything between last ; or { and this ':')
+                size_t prop_start = result.size();
+                while (prop_start > 0) {
+                    prop_start--;
+                    if (result[prop_start] == ';' || result[prop_start] == '{') {
+                        prop_start++;
+                        break;
+                    }
+                }
+                last_property = result.substr(prop_start);
+                // Trim whitespace
+                while (!last_property.empty() && (last_property.back() == ' ' || last_property.back() == '\t'))
+                    last_property.pop_back();
+                while (!last_property.empty() && (last_property.front() == ' ' || last_property.front() == '\t'))
+                    last_property.erase(0, 1);
+
                 result += c;
                 i++;
                 if (i >= out.size()) break;
@@ -327,6 +419,10 @@ std::string tinyizer::minify_css_text(const std::string& css) {
                 // Extract and optimize value
                 if (i > val_start) {
                     std::string val(out, val_start, i - val_start);
+                    // Property-specific value optimizations
+                    if (last_property == "font-family") {
+                        val = strip_font_family_quotes(val);
+                    }
                     std::string opt_val = minify_css_value(val);
                     result += opt_val;
                 }
