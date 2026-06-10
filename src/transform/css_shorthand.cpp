@@ -3,6 +3,7 @@
 #include "../parser/tokenizer.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -45,6 +46,93 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
 };
 
 // CSS value minification helpers
+// Try to constant-fold a simple calc expression: "10px + 20px" → "30px"
+// Returns empty string if folding isn't possible (mixed units, complex expression, etc.)
+static std::string try_fold_calc(const std::string& expr) {
+    // Find the operator: only handle single + or - at top level
+    size_t op_pos = std::string::npos;
+    char op_char = 0;
+    int depth = 0;
+    for (size_t i = 0; i < expr.size(); i++) {
+        char c = expr[i];
+        if (c == '(') depth++;
+        else if (c == ')') depth--;
+        else if (depth == 0 && (c == '+' || c == '-')) {
+            // Skip leading sign
+            if (i > 0 && expr[i-1] != 'e' && expr[i-1] != 'E' && expr[i-1] != '*' && expr[i-1] != '/') {
+                op_pos = i;
+                op_char = c;
+                break;
+            }
+        }
+        else if (depth == 0 && (c == '*' || c == '/')) return ""; // too complex
+    }
+    if (op_pos == std::string::npos) return ""; // no operator found
+
+    std::string left = expr.substr(0, op_pos);
+    std::string right = expr.substr(op_pos + 1);
+
+    // Trim whitespace
+    auto trim = [](std::string& s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0,1);
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    };
+    trim(left);
+    trim(right);
+    if (left.empty() || right.empty()) return "";
+
+    // Parse numeric value and optional unit from a string like "10.5px"
+    auto parse_num_unit = [](const std::string& s, double& num, std::string& unit) -> bool {
+        size_t pos = 0;
+        // Skip leading sign if present (for subtraction edge cases)
+        if (pos < s.size() && s[pos] == '-') pos++;
+        bool has_digit = false;
+        while (pos < s.size() && (std::isdigit(static_cast<unsigned char>(s[pos])) || s[pos] == '.')) {
+            has_digit = true;
+            pos++;
+        }
+        if (!has_digit) return false;
+        // Use strtod for conversion (no exceptions)
+        char* end = nullptr;
+        num = std::strtod(s.c_str(), &end);
+        if (end == s.c_str()) return false;
+        unit = std::string(end);
+        // Trim whitespace from unit
+        while (!unit.empty() && std::isspace(static_cast<unsigned char>(unit.front()))) unit.erase(0,1);
+        while (!unit.empty() && std::isspace(static_cast<unsigned char>(unit.back()))) unit.pop_back();
+        return true;
+    };
+
+    double left_num, right_num;
+    std::string left_unit, right_unit;
+    if (!parse_num_unit(left, left_num, left_unit)) return "";
+    if (!parse_num_unit(right, right_num, right_unit)) return "";
+
+    // Only fold when units match (or both unitless)
+    if (left_unit != right_unit) return "";
+
+    double result;
+    if (op_char == '+') result = left_num + right_num;
+    else result = left_num - right_num;
+
+    // Format result: remove trailing zeros to save bytes
+    std::string result_str;
+    if (result == static_cast<long long>(result)) {
+        result_str = std::to_string(static_cast<long long>(result));
+    } else {
+        result_str = std::to_string(result);
+        // Remove trailing zeros
+        while (result_str.find('.') != std::string::npos && result_str.size() > 1) {
+            char last = result_str.back();
+            if (last == '0') result_str.pop_back();
+            else if (last == '.') { result_str.pop_back(); break; }
+            else break;
+        }
+    }
+
+    return result_str + left_unit;
+}
+
 std::string minify_css_value(const std::string& value) {
     // Named colors shorter than their hex representation
     static const std::unordered_map<std::string, std::string> NAMED_COLOR = {
@@ -81,6 +169,11 @@ std::string minify_css_value(const std::string& value) {
         }
         if (is_simple && depth == 0) {
             return minify_css_value(inner);
+        }
+        // Constant-fold simple calc expressions: calc(10px + 20px) → 30px
+        if (depth == 0) {
+            std::string folded = try_fold_calc(inner);
+            if (!folded.empty()) return minify_css_value(folded);
         }
     }
 
