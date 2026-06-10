@@ -44,10 +44,16 @@ JSScope::Variable* JSScope::find_variable(std::string_view name) {
 void JSScope::declare_function(std::string_view name, const std::vector<std::string_view>& params, bool exported) {
     std::string key(name);
     auto& fn = functions_[key];
-    fn.name = std::move(key);
+    fn.name = key;
     fn.param_names.clear();
     for (auto p : params) fn.param_names.push_back(std::string(p));
     if (exported) fn.is_exported = true;
+    // If this function was referenced before its declaration (hoisting),
+    // mark it as referenced.
+    if (pending_function_refs_.count(key)) {
+        fn.is_referenced = true;
+        pending_function_refs_.erase(key);
+    }
 }
 
 void JSScope::reference_function(std::string_view name) {
@@ -61,6 +67,10 @@ void JSScope::reference_function(std::string_view name) {
         }
         scope = scope->parent_;
     }
+    // Not found — add to pending set in the current scope.
+    // When the function declaration is later processed (hoisting),
+    // declare_function will check this set and mark it as referenced.
+    pending_function_refs_.insert(std::move(key));
 }
 
 JSScope::FunctionInfo* JSScope::find_function(std::string_view name) {

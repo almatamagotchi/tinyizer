@@ -63,6 +63,11 @@ private:
     std::unordered_map<std::string, Variable> variables_;
     std::unordered_map<std::string, FunctionInfo> functions_;
     std::vector<std::unique_ptr<JSScope>> children_;
+    // Names referenced before their declaration (handles function hoisting).
+    // When declare_function/declare_variable encounters a name in these sets,
+    // it marks the declaration as referenced.
+    std::unordered_set<std::string> pending_variable_refs_;
+    std::unordered_set<std::string> pending_function_refs_;
 };
 
 } // namespace tinyizer
