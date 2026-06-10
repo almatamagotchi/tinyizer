@@ -60,6 +60,7 @@ private:
     bool pass_dead_js(UnifiedDocument& doc);
     bool pass_css_shorthand(UnifiedDocument& doc);
     bool pass_css_value_fold(UnifiedDocument& doc);
+    bool pass_css_default_strip(UnifiedDocument& doc);
     bool pass_js_constant_fold(UnifiedDocument& doc);
     bool pass_brotli_reorder(UnifiedDocument& doc);
     bool pass_obfuscation(UnifiedDocument& doc);

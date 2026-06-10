@@ -1194,6 +1194,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         if (config_.enable_css_minify && pass_css_minify(doc))
             changed_this_iteration = true;
 
+        if (config_.enable_css_minify && pass_css_default_strip(doc))
+            changed_this_iteration = true;
+
         if (config_.enable_html_minify && pass_html_minify(doc))
             changed_this_iteration = true;
 

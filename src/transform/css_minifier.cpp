@@ -65,4 +65,61 @@ bool Optimizer::pass_css_minify(UnifiedDocument& doc) {
     return changed;
 }
 
+// Strip CSS declarations whose value matches the CSS initial value for that property.
+// Only safe for non-inherited properties where UA stylesheets don't set non-initial values.
+bool Optimizer::pass_css_default_strip(UnifiedDocument& doc) {
+    // Properties that are NOT inherited AND safe to strip when set to their initial value.
+    // No UA stylesheet sets these to anything other than the initial value for any element.
+    //
+    // A property-value pair is only stripped if the value exactly matches the initial value
+    // (after prior minification passes have normalized the value — e.g., font-weight:400
+    // was already normalized from "normal" by pass_css_minify).
+    //
+    // Note: does NOT handle shorthands like overflow or background — only longhand/simple
+    // properties to avoid cascade-side-effect complexity.
+    static const std::unordered_map<std::string_view, std::string_view> INITIAL_VALUES = {
+        {"position", "static"},
+        {"float", "none"},
+        {"clear", "none"},
+        {"opacity", "1"},
+        {"transform", "none"},
+        {"filter", "none"},
+        {"resize", "none"},
+        {"perspective", "none"},
+        {"backface-visibility", "visible"},
+        {"text-decoration-line", "none"},
+        {"text-decoration-style", "solid"},
+        {"text-decoration-color", "currentcolor"},
+        {"text-overflow", "clip"},
+        {"mix-blend-mode", "normal"},
+        {"isolation", "auto"},
+    };
+
+    bool changed = false;
+
+    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+        auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
+
+        // Track which properties we strip — needed because the value comparison
+        // must use the post-minification value (e.g., "normal" → "400" for font-weight
+        // was already done by pass_css_minify before this pass runs).
+        std::vector<size_t> to_remove;
+
+        for (size_t i = 0; i < decls.size(); i++) {
+            auto it = INITIAL_VALUES.find(decls[i].property);
+            if (it != INITIAL_VALUES.end() && decls[i].value == it->second) {
+                to_remove.push_back(i);
+            }
+        }
+
+        // Remove in reverse order to preserve indices
+        for (size_t j = to_remove.size(); j > 0; j--) {
+            decls.erase(decls.begin() + to_remove[j - 1]);
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 } // namespace tinyizer
