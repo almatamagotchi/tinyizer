@@ -249,6 +249,76 @@ static size_t replace_undefined_with_void(std::string& js) {
     return replacements;
 }
 
+// ---- Replace `Infinity` with `1/0` ----
+// `Infinity` is 8 bytes while `1/0` is 3, saving 5 bytes per occurrence.
+// Same safety rules as the undefined→void 0 pass: skip strings, property
+// accesses, declarations, and function parameters.
+static size_t replace_infinity_with_division(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    const std::string target = "Infinity";
+    size_t replacements = 0;
+
+    std::vector<size_t> positions;
+    size_t pos = 0;
+    while ((pos = js.find(target, pos)) != std::string::npos) {
+        if (inside_string(pos)) { pos += target.size(); continue; }
+
+        // Skip if preceded by '.' (property access: obj.Infinity)
+        if (pos > 0 && js[pos - 1] == '.') { pos += target.size(); continue; }
+
+        // Skip if part of a larger identifier
+        if (pos > 0 && is_ident(js[pos - 1])) { pos += target.size(); continue; }
+        if (pos + target.size() < js.size() && is_ident(js[pos + target.size()])) {
+            pos += target.size(); continue;
+        }
+
+        // Skip declarations and parameters (same logic as undefined pass)
+        bool is_decl = false;
+        {
+            size_t scan = pos;
+            while (scan > 0 && (js[scan - 1] == ' ' || js[scan - 1] == '\t' || js[scan - 1] == '\n' || js[scan - 1] == '\r'))
+                scan--;
+            if (scan >= 3 && js.compare(scan - 3, 3, "var") == 0) {
+                if (scan < 4 || !is_ident(js[scan - 4])) is_decl = true;
+            }
+            if (scan >= 3 && js.compare(scan - 3, 3, "let") == 0) {
+                if (scan < 4 || !is_ident(js[scan - 4])) is_decl = true;
+            }
+            if (scan >= 5 && js.compare(scan - 5, 5, "const") == 0) {
+                if (scan < 6 || !is_ident(js[scan - 6])) is_decl = true;
+            }
+            if (scan > 0 && (js[scan - 1] == '(' || js[scan - 1] == ','))
+                is_decl = true;
+        }
+        if (is_decl) { pos += target.size(); continue; }
+
+        positions.push_back(pos);
+        pos += target.size();
+    }
+
+    for (auto it = positions.rbegin(); it != positions.rend(); ++it) {
+        js.replace(*it, target.size(), "1/0");
+        replacements++;
+    }
+
+    return replacements;
+}
+
 // ---- Strip orphan top-level assignments ----
 // After var stripping, a dead `var x = 1;` becomes `x = 1;` — an assignment
 // whose target is never read elsewhere. Scan top-level (depth 0) for
@@ -1424,6 +1494,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         strip_console_calls(opt_js);
         // Replace `undefined` with `void 0` (9→6 bytes per occurrence)
         replace_undefined_with_void(opt_js);
+        // Replace `Infinity` with `1/0` (8→3 bytes per occurrence)
+        replace_infinity_with_division(opt_js);
         // Strip functions that became empty after console call removal
         strip_empty_functions(opt_js);
         // Strip functions that became unreferenced after console stripping
