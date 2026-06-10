@@ -586,44 +586,88 @@ static std::string fold_dead_branches(const std::string& js) {
     return changed ? result : js;
 }
 
-static std::string fold_unary_not(const std::string& js) {
+static std::string fold_unary_ops(const std::string& js) {
     // !true -> false, !false -> true, !0 -> true, !1 -> false
+    // !"x" -> false, !"" -> true
+    // !!0 -> false, !!1 -> true, !!"" -> false, !!"." -> true
+    // !!true -> true, !!false -> false
     std::string result = js;
     bool changed = true;
     int iterations = 0;
     
-    while (changed && iterations < 10) {
+    while (changed && iterations < 20) {
         changed = false;
         iterations++;
         
+        // !!true -> true, !!false -> false
+        std::regex dd_not_true(R"(!\s*!\s*true)");
+        if (std::regex_search(result, dd_not_true)) {
+            result = std::regex_replace(result, dd_not_true, "true");
+            changed = true; continue;
+        }
+        std::regex dd_not_false(R"(!\s*!\s*false)");
+        if (std::regex_search(result, dd_not_false)) {
+            result = std::regex_replace(result, dd_not_false, "false");
+            changed = true; continue;
+        }
+        
+        // !!0 -> false, !!1 -> true
+        std::regex dd_not_0(R"(!\s*!\s*0\b)");
+        if (std::regex_search(result, dd_not_0)) {
+            result = std::regex_replace(result, dd_not_0, "false");
+            changed = true; continue;
+        }
+        std::regex dd_not_1(R"(!\s*!\s*1\b)");
+        if (std::regex_search(result, dd_not_1)) {
+            result = std::regex_replace(result, dd_not_1, "true");
+            changed = true; continue;
+        }
+        
+        // String-based ! and !! folding removed: unsafe without string-boundary awareness.
+        // Patterns like !"x" could match inside string literals (e.g., "Hello!").
+        // The follow-on fold_constants_in_text() call handles these at a different stage.
+        
+        // !true -> false
         std::regex not_true(R"(!\s*true)");
         if (std::regex_search(result, not_true)) {
             result = std::regex_replace(result, not_true, "false");
-            changed = true;
-            continue;
+            changed = true; continue;
         }
         
+        // !false -> true
         std::regex not_false(R"(!\s*false)");
         if (std::regex_search(result, not_false)) {
             result = std::regex_replace(result, not_false, "true");
-            changed = true;
-            continue;
+            changed = true; continue;
         }
         
+        // !0 -> true
         std::regex not_0(R"(!\s*0\b)");
         if (std::regex_search(result, not_0)) {
             result = std::regex_replace(result, not_0, "true", std::regex_constants::format_first_only);
-            changed = true;
-            continue;
+            changed = true; continue;
         }
         
+        // !1 -> false
         std::regex not_1(R"(!\s*1\b)");
         if (std::regex_search(result, not_1)) {
             result = std::regex_replace(result, not_1, "false", std::regex_constants::format_first_only);
-            changed = true;
-            continue;
+            changed = true; continue;
         }
     }
+    
+    return result;
+}
+
+// Remove unnecessary parentheses around function calls and simple identifiers.
+// return(x) -> return x, (ident) -> ident.
+// Does NOT touch operator expressions where parens affect precedence.
+static std::string strip_unnecessary_parens(const std::string& js) {
+    std::string result = js;
+    
+    // return(identifier) -> return identifier
+    std::regex ret_paren(R"(return\s*\(\s*([a-zA-Z_$][\w$]*)\s*\))");
+    result = std::regex_replace(result, ret_paren, "return $1");
     
     return result;
 } // anonymous namespace
@@ -664,8 +708,16 @@ std::string fold_constants_in_text(const std::string& js) {
             continue;
         }
         
-        // Unary NOT folding
-        folded = fold_unary_not(result);
+        // Unary ops folding (!, !! on constants and string literals)
+        folded = fold_unary_ops(result);
+        if (folded != result) {
+            any_change = true;
+            result = std::move(folded);
+            continue;
+        }
+        
+        // Remove unnecessary parentheses: return(x) -> return x
+        folded = strip_unnecessary_parens(result);
         if (folded != result) {
             any_change = true;
             result = std::move(folded);
@@ -678,21 +730,9 @@ std::string fold_constants_in_text(const std::string& js) {
 bool Optimizer::pass_js_constant_fold(UnifiedDocument& doc) {
     bool changed = false;
 
-    // Text-based constant folding on each parsed inline script's raw source.
-    // We fold numeric/string/unary expressions directly in the source text.
-    // This complements the AST-based approach (which requires source offsets).
-    for (size_t idx = 0; idx < doc.inline_scripts().size(); idx++) {
-        const std::string& original = doc.inline_scripts()[idx];
-        std::string folded = fold_constants_in_text(original);
-        if (folded != original) {
-            // We need to update the JS text.
-            // Since inline_scripts() returns const ref, we use the mutable accessor.
-            doc.set_inline_script(idx, folded);
-            changed = true;
-        }
-    }
-
-    // Also fold constants in optimized_js (output from previous passes)
+    // Fold constants in optimized_js (standalone JS mode output).
+    // Inline scripts are folded later during the JS loop (after dead-code
+    // elimination), since varying-length folds break AST source offsets.
     for (size_t idx = 0; idx < doc.optimized_js.size(); idx++) {
         std::string folded = fold_constants_in_text(doc.optimized_js[idx]);
         if (folded != doc.optimized_js[idx]) {
