@@ -1400,6 +1400,10 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
 
         // JS minification
         opt_js = minify_js_text(opt_js);
+        // Strip trailing semicolon from end of script — the last
+        // statement in JS doesn't need a terminating semicolon.
+        while (!opt_js.empty() && opt_js.back() == ';')
+            opt_js.pop_back();
         doc.optimized_js.push_back(std::move(opt_js));
     }
 
