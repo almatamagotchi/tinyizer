@@ -3,6 +3,7 @@
 #include <string>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
 #include <regex>
 
 namespace tinyizer {
@@ -722,15 +723,97 @@ static std::string strip_leading_zero(const std::string& js) {
 }
 
 // Remove unnecessary parentheses around function calls and simple identifiers.
-// return(x) -> return x, (ident) -> ident.
-// Does NOT touch operator expressions where parens affect precedence.
+ // return(x) -> return x, return (a?b:c) -> return a?b:c.
+// Removes outer parens from any return expression where parens are unnecessary.
+// Skips parens inside strings, comments, and regex literals.
 static std::string strip_unnecessary_parens(const std::string& js) {
-    std::string result = js;
-    
-    // return(identifier) -> return identifier
-    std::regex ret_paren(R"(return\s*\(\s*([a-zA-Z_$][\w$]*)\s*\))");
-    result = std::regex_replace(result, ret_paren, "return $1");
-    
+    std::string result;
+    result.reserve(js.size());
+
+    enum { NORMAL, DQUOTE, SQUOTE, TEMPLATE, LINE_COMMENT, BLOCK_COMMENT, REGEX } state = NORMAL;
+
+    for (size_t i = 0; i < js.size(); ++i) {
+        char c = js[i];
+        char nc = (i + 1 < js.size()) ? js[i + 1] : 0;
+
+        // State transitions
+        if (state == NORMAL) {
+            if (c == '/' && nc == '/') { state = LINE_COMMENT; result += c; continue; }
+            if (c == '/' && nc == '*') { state = BLOCK_COMMENT; result += c; result += nc; ++i; continue; }
+            if (c == '"') { state = DQUOTE; result += c; continue; }
+            if (c == '\'') { state = SQUOTE; result += c; continue; }
+            if (c == '`') { state = TEMPLATE; result += c; continue; }
+            if (c == '/' && !result.empty() && strchr(")}];", result.back())) {
+                // Heuristic: / after } ) ] ; is likely regex
+                state = REGEX;
+                result += c;
+                continue;
+            }
+
+            // Look for return (...)
+            if (c == 'r' && i + 6 < js.size()) {
+                const char* rest = js.c_str() + i;
+                if (strncmp(rest, "return", 6) == 0) {
+                    size_t pos = i + 6;
+                    // skip whitespace
+                    while (pos < js.size() && (js[pos] == ' ' || js[pos] == '\t')) ++pos;
+                    if (pos < js.size() && js[pos] == '(') {
+                        // Find matching close paren
+                        int depth = 1;
+                        size_t close = pos + 1;
+                        while (close < js.size() && depth > 0) {
+                            char cc = js[close];
+                            if (cc == '(') ++depth;
+                            else if (cc == ')') --depth;
+                            ++close;
+                        }
+                        if (depth == 0) {
+                            --close; // point to ')'
+                            // Check what follows: ; } newline or eof
+                            size_t after = close + 1;
+                            while (after < js.size() && (js[after] == ' ' || js[after] == '\t')) ++after;
+                            bool at_end = (after >= js.size() || js[after] == ';' || js[after] == '}' || js[after] == '\n' || js[after] == '\r');
+                            if (at_end) {
+                                result += std::string(js.c_str() + i, 6); // "return"
+                                while (pos < close && (js[pos] == ' ' || js[pos] == '\t')) ++pos; // skip ws + '('
+                                ++pos; // skip '('
+                                while (pos < close && (js[pos] == ' ' || js[pos] == '\t')) ++pos; // skip ws after '('
+                                // Append inner expression without outer parens
+                                result += ' ';
+                                result += std::string(js.c_str() + pos, close - pos);
+                                i = close; // advance past ')'
+                                // Skip trailing whitespace
+                                while (i + 1 < js.size() && (js[i + 1] == ' ' || js[i + 1] == '\t')) ++i;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            result += c;
+        } else if (state == LINE_COMMENT) {
+            if (c == '\n') { state = NORMAL; }
+            result += c;
+        } else if (state == BLOCK_COMMENT) {
+            if (c == '*' && nc == '/') { state = NORMAL; result += c; result += nc; ++i; continue; }
+            result += c;
+        } else if (state == DQUOTE) {
+            if (c == '\\') { result += c; if (nc) { result += nc; ++i; } continue; }
+            if (c == '"') state = NORMAL;
+            result += c;
+        } else if (state == SQUOTE) {
+            if (c == '\\') { result += c; if (nc) { result += nc; ++i; } continue; }
+            if (c == '\'') state = NORMAL;
+            result += c;
+        } else if (state == TEMPLATE) {
+            if (c == '`') state = NORMAL;
+            result += c;
+        } else if (state == REGEX) {
+            if (c == '\\') { result += c; if (nc) { result += nc; ++i; } continue; }
+            if (c == '/') state = NORMAL;
+            result += c;
+        }
+    }
     return result;
 } // anonymous namespace
 
