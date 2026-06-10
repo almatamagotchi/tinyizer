@@ -319,6 +319,89 @@ static size_t replace_infinity_with_division(std::string& js) {
     return replacements;
 }
 
+// ---- Strip redundant parens after `return` ----
+// `return (expr)` → `return expr` saves 2 bytes per occurrence.
+// The parens are redundant in expression context; only needed with ASI
+// (line break between `return` and expression), which doesn't apply
+// in minified single-line output.
+static size_t strip_return_parens(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    const std::string prefix = "return(";
+    size_t replacements = 0;
+    size_t pos = 0;
+
+    while ((pos = js.find(prefix, pos)) != std::string::npos) {
+        // Skip if inside string
+        if (inside_string(pos)) { pos += prefix.size(); continue; }
+
+        // Verify `return` is a standalone keyword (not part of a larger identifier)
+        if (pos >= 6) {
+            char prev = js[pos - 1];
+            if (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_' || prev == '$') {
+                pos += prefix.size(); continue;
+            }
+        }
+
+        // Find matching closing paren
+        size_t open_pos = pos + 6; // position of '('
+        size_t scan = open_pos + 1;
+        int depth = 1;
+        bool found = false;
+        while (scan < js.size() && depth > 0) {
+            if (inside_string(scan)) { scan++; continue; }
+            if (js[scan] == '(') depth++;
+            else if (js[scan] == ')') depth--;
+            if (depth == 0) { found = true; break; }
+            scan++;
+        }
+        if (!found || scan <= open_pos + 1) {
+            // No matching paren, or empty parens: skip
+            pos += prefix.size(); continue;
+        }
+
+        // Extract contents between parens
+        size_t content_start = open_pos + 1;
+        size_t content_end = scan; // position of ')'
+        std::string contents = js.substr(content_start, content_end - content_start);
+
+        // Replace `return(contents)` with `return contents`
+        // Need a space between `return` and contents when contents starts with
+        // an identifier char (+/-/!/~ for unary ops bind to `return` otherwise)
+        char first = '\0';
+        for (size_t i = 0; i < contents.size(); i++) {
+            if (contents[i] != ' ' && contents[i] != '\t' && contents[i] != '\n' && contents[i] != '\r') {
+                first = contents[i];
+                break;
+            }
+        }
+        bool need_space = (first != '\0' &&
+            (std::isalnum(static_cast<unsigned char>(first)) ||
+             first == '_' || first == '$' || first == '!' || first == '~' ||
+             first == '+' || first == '-'));
+
+        std::string replacement = "return";
+        if (need_space) replacement += ' ';
+        replacement += contents;
+
+        js.replace(pos, content_end - pos + 1, replacement);
+        replacements++;
+        pos += replacement.size();
+    }
+
+    return replacements;
+}
+
 // ---- Strip orphan top-level assignments ----
 // After var stripping, a dead `var x = 1;` becomes `x = 1;` — an assignment
 // whose target is never read elsewhere. Scan top-level (depth 0) for
@@ -1496,6 +1579,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         replace_undefined_with_void(opt_js);
         // Replace `Infinity` with `1/0` (8→3 bytes per occurrence)
         replace_infinity_with_division(opt_js);
+        // Strip redundant parens after `return` (2 bytes saved per occurrence)
+        strip_return_parens(opt_js);
         // Strip functions that became empty after console call removal
         strip_empty_functions(opt_js);
         // Strip functions that became unreferenced after console stripping
