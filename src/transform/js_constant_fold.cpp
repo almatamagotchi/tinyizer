@@ -659,6 +659,68 @@ static std::string fold_unary_ops(const std::string& js) {
     return result;
 }
 
+// Strip leading zero from decimal literals: 0.5->.5, 0.123->.123
+// The leading zero before a decimal point is never required in JS.
+// Only matches standalone "0." followed by digits, not inside strings.
+static std::string strip_leading_zero(const std::string& js) {
+    std::string result;
+    result.reserve(js.size());
+    bool in_string = false;
+    char str_char = 0;
+    bool in_tmpl = false;
+    bool in_regex = false;
+
+    for (size_t i = 0; i < js.size(); i++) {
+        char c = js[i];
+        char n = (i + 1 < js.size()) ? js[i + 1] : 0;
+
+        if (in_string) {
+            if (c == '\\') { result += c; result += n; i++; continue; }
+            if (c == str_char) in_string = false;
+            result += c; continue;
+        }
+        if (in_tmpl) {
+            if (c == '\\') { result += c; result += n; i++; continue; }
+            if (c == '`') in_tmpl = false;
+            result += c; continue;
+        }
+        if (in_regex) {
+            if (c == '\\') { result += c; result += n; i++; continue; }
+            if (c == '/') in_regex = false;
+            result += c; continue;
+        }
+        if (c == '"' || c == '\'') { in_string = true; str_char = c; result += c; continue; }
+        if (c == '`') { in_tmpl = true; result += c; continue; }
+        if (c == '/' && n != '/' && n != '*') {
+            char prev = result.empty() ? 0 : result.back();
+            if (prev == '(' || prev == '=' || prev == '!' || prev == '&' ||
+                prev == '|' || prev == '{' || prev == ';' || prev == ':' ||
+                prev == '[' || prev == ',' || prev == '?' || prev == '~') {
+                in_regex = true;
+                result += c;
+                continue;
+            }
+        }
+
+        // Detect "0." pattern: leading zero before a decimal point
+        // Must be preceded by a non-identifier character to avoid
+        // matching inside longer hex/octal numbers or identifiers.
+        if (c == '0' && n == '.') {
+            char p = result.empty() ? 0 : result.back();
+            bool preceded_by_non_ident = result.empty() ||
+                !(std::isalnum(static_cast<unsigned char>(p)) || p == '_' || p == '$');
+            if (preceded_by_non_ident) {
+                result += '.'; // skip the '0', emit just '.'
+                i++; // skip the '0' we consumed and the '.' we'll hit on next loop
+                continue;
+            }
+        }
+
+        result += c;
+    }
+    return result;
+}
+
 // Remove unnecessary parentheses around function calls and simple identifiers.
 // return(x) -> return x, (ident) -> ident.
 // Does NOT touch operator expressions where parens affect precedence.
@@ -718,6 +780,14 @@ std::string fold_constants_in_text(const std::string& js) {
         
         // Remove unnecessary parentheses: return(x) -> return x
         folded = strip_unnecessary_parens(result);
+        if (folded != result) {
+            any_change = true;
+            result = std::move(folded);
+            continue;
+        }
+
+        // Strip leading zero from decimal literals: 0.5 -> .5
+        folded = strip_leading_zero(result);
         if (folded != result) {
             any_change = true;
             result = std::move(folded);
