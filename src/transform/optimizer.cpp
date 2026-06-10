@@ -1188,6 +1188,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         if (config_.enable_css_shorthand && pass_css_value_fold(doc))
             changed_this_iteration = true;
 
+        if (config_.enable_css_shorthand && pass_css_math_fold(doc))
+            changed_this_iteration = true;
+
         if (config_.enable_js_constant_fold && pass_js_constant_fold(doc))
             changed_this_iteration = true;
 

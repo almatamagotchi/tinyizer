@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -955,6 +956,214 @@ bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
 
             if (!folded.empty()) {
                 decl.value = doc.string_pool().intern(folded);
+                changed = true;
+            }
+        }
+    }
+
+    return changed;
+}
+
+// Fold CSS math functions: min(), max(), clamp()
+// e.g., max(10px, 20px) → 20px, min(1em, 2em) → 1em
+//       clamp(0px, 50px, 100px) → 50px
+// Only folds when all arguments have the same explicit CSS unit
+// and are simple numeric values (no calc(), var(), nested functions).
+bool Optimizer::pass_css_math_fold(UnifiedDocument& doc) {
+    bool changed = false;
+
+    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+        auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
+
+        for (auto& decl : decls) {
+            std::string_view val = decl.value;
+            std::string result;
+            bool decl_changed = false;
+            result.reserve(val.size());
+
+            size_t i = 0;
+            while (i < val.size()) {
+                // Look for "min(", "max(", "clamp("
+                size_t next_func = std::string_view::npos;
+                const char* func_name = nullptr;
+                int func_len = 0;
+
+                for (size_t k = i; k < val.size(); k++) {
+                    if (tolower(val[k]) == 'm') {
+                        if (k + 3 < val.size() && val[k+1] == 'i' && val[k+2] == 'n' && val[k+3] == '(') {
+                            next_func = k; func_name = "min"; func_len = 3; break;
+                        }
+                        if (k + 3 < val.size() && val[k+1] == 'a' && val[k+2] == 'x' && val[k+3] == '(') {
+                            next_func = k; func_name = "max"; func_len = 3; break;
+                        }
+                    }
+                    if (tolower(val[k]) == 'c') {
+                        if (k + 5 < val.size() && tolower(val[k+1]) == 'l' && tolower(val[k+2]) == 'a' &&
+                            tolower(val[k+3]) == 'm' && tolower(val[k+4]) == 'p' && val[k+5] == '(') {
+                            next_func = k; func_name = "clamp"; func_len = 5; break;
+                        }
+                    }
+                }
+
+                if (next_func == std::string_view::npos) {
+                    result.append(val.data() + i, val.size() - i);
+                    break;
+                }
+
+                // Copy everything before the function
+                result.append(val.data() + i, next_func - i);
+                i = next_func + func_len + 1; // past "func("
+
+                // Find matching closing paren
+                size_t paren_depth = 1;
+                size_t close = i;
+                while (close < val.size() && paren_depth > 0) {
+                    if (val[close] == '(') paren_depth++;
+                    else if (val[close] == ')') paren_depth--;
+                    close++;
+                }
+                if (paren_depth != 0) {
+                    // Malformed — copy raw rest and bail
+                    result.append(val.data() + i - func_len - 1, val.size() - (i - func_len - 1));
+                    i = val.size();
+                    break;
+                }
+                // close is one past ')'
+                size_t args_end = close - 1;
+
+                // Parse comma-separated arguments
+                std::vector<std::string_view> args;
+                size_t arg_start = i;
+                size_t arg_paren = 0;
+                for (size_t p = i; p < args_end; p++) {
+                    if (val[p] == '(') arg_paren++;
+                    else if (val[p] == ')') arg_paren--;
+                    else if (val[p] == ',' && arg_paren == 0) {
+                        // Trim whitespace
+                        size_t s = arg_start, e = p;
+                        while (s < e && is_whitespace(val[s])) s++;
+                        while (e > s && is_whitespace(val[e-1])) e--;
+                        if (s < e) args.push_back(val.substr(s, e - s));
+                        arg_start = p + 1;
+                    }
+                }
+                // Last arg
+                {
+                    size_t s = arg_start, e = args_end;
+                    while (s < e && is_whitespace(val[s])) s++;
+                    while (e > s && is_whitespace(val[e-1])) e--;
+                    if (s < e) args.push_back(val.substr(s, e - s));
+                }
+
+                // Extract numeric values with units
+                struct NumVal {
+                    double num;
+                    std::string_view unit;
+                    bool valid;
+                };
+                std::vector<NumVal> parsed;
+                bool all_valid = true;
+                std::string_view common_unit;
+
+                for (auto& arg : args) {
+                    if (arg.empty()) { all_valid = false; break; }
+                    // Check for signs
+                    size_t pos = 0;
+                    bool negative = false;
+                    if (arg[pos] == '-' || arg[pos] == '+') {
+                        negative = (arg[pos] == '-');
+                        pos++;
+                    }
+                    // Parse number
+                    double num = 0;
+                    bool has_digits = false;
+                    if (pos < arg.size() && is_digit(arg[pos])) {
+                        has_digits = true;
+                        while (pos < arg.size() && is_digit(arg[pos])) {
+                            num = num * 10 + (arg[pos] - '0');
+                            pos++;
+                        }
+                    }
+                    if (pos < arg.size() && arg[pos] == '.') {
+                        pos++;
+                        double frac = 0, div = 1;
+                        while (pos < arg.size() && is_digit(arg[pos])) {
+                            frac = frac * 10 + (arg[pos] - '0');
+                            div *= 10;
+                            has_digits = true;
+                            pos++;
+                        }
+                        num += frac / div;
+                    }
+                    if (!has_digits) { all_valid = false; break; }
+                    if (negative) num = -num;
+
+                    // Extract unit
+                    std::string_view unit = arg.substr(pos);
+                    if (unit.empty()) {
+                        // Unitless zero — treat as any unit; only valid if value is 0
+                    }
+
+                    if (!parsed.empty() && unit != common_unit) {
+                        // Unitless zero matches any unit; empty common_unit accepts first real unit
+                        if (!(common_unit.empty() || (num == 0 && unit.empty()))) {
+                            all_valid = false;
+                            break;
+                        }
+                    }
+                    if (!unit.empty()) common_unit = unit;
+                    parsed.push_back({num, unit, true});
+                }
+
+                if (!all_valid || parsed.size() < 2 || parsed.size() > 10) {
+                    // Can't fold — output original
+                    result.append(val.data() + next_func, close - next_func);
+                    i = close;
+                    continue;
+                }
+
+                // Apply the function
+                double result_num;
+                if (strcmp(func_name, "min") == 0) {
+                    result_num = parsed[0].num;
+                    for (size_t k = 1; k < parsed.size(); k++)
+                        if (parsed[k].num < result_num) result_num = parsed[k].num;
+                } else if (strcmp(func_name, "max") == 0) {
+                    result_num = parsed[0].num;
+                    for (size_t k = 1; k < parsed.size(); k++)
+                        if (parsed[k].num > result_num) result_num = parsed[k].num;
+                } else { // clamp
+                    if (parsed.size() != 3) {
+                        result.append(val.data() + next_func, close - next_func);
+                        i = close;
+                        continue;
+                    }
+                    double clamp_lo = parsed[0].num;
+                    double clamp_val = parsed[1].num;
+                    double clamp_hi = parsed[2].num;
+                    if (clamp_val < clamp_lo) result_num = clamp_lo;
+                    else if (clamp_val > clamp_hi) result_num = clamp_hi;
+                    else result_num = clamp_val;
+                }
+
+                // Format the result
+                // Strip trailing zeros from the fractional part
+                char buf[64];
+                snprintf(buf, sizeof(buf), "%g", result_num);
+                std::string num_str(buf);
+                // Handle "0." — if just "0", keep it
+                // Append unit
+                if (!common_unit.empty()) {
+                    num_str += common_unit;
+                }
+                result += num_str;
+
+                i = close;
+                decl_changed = true;
+            }
+
+            if (decl_changed) {
+                decl.value = doc.string_pool().intern(result);
                 changed = true;
             }
         }
