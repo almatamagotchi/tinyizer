@@ -353,7 +353,164 @@ std::string minify_css_value(const std::string& value) {
             }
         }
 
-        // Named color → hex when shorter
+        // Check for hsl() / hsla()
+        if (i + 4 < value.size() && tolower(value[i]) == 'h' && tolower(value[i+1]) == 's' && tolower(value[i+2]) == 'l') {
+            bool is_hsla = false;
+            size_t j = i + 3; // past "hsl"
+            if (j < value.size() && tolower(value[j]) == 'a') { is_hsla = true; j++; }
+            if (j < value.size() && value[j] == '(') {
+                j++; // past '('
+                int h = 0, s = 0, l = 0, a = 255;
+                int channel_idx = 0;
+                int max_channels = is_hsla ? 4 : 3;
+                bool parse_ok = true;
+
+                for (channel_idx = 0; channel_idx < max_channels && parse_ok; channel_idx++) {
+                    while (j < value.size() && is_whitespace(value[j])) j++;
+                    if (j >= value.size()) { parse_ok = false; break; }
+
+                    int int_part = 0, frac_part = 0, frac_div = 1;
+                    bool has_digits = false;
+
+                    if (j < value.size() && is_digit(value[j])) {
+                        has_digits = true;
+                        while (j < value.size() && is_digit(value[j])) {
+                            int_part = int_part * 10 + (value[j] - '0');
+                            j++;
+                        }
+                    }
+
+                    if (j < value.size() && value[j] == '.') {
+                        j++;
+                        while (j < value.size() && is_digit(value[j])) {
+                            frac_part = frac_part * 10 + (value[j] - '0');
+                            frac_div *= 10;
+                            has_digits = true;
+                            j++;
+                        }
+                    }
+
+                    if (!has_digits) { parse_ok = false; break; }
+
+                    bool is_pct = false;
+                    if (j < value.size() && value[j] == '%') {
+                        is_pct = true;
+                        j++;
+                    }
+
+                    int val = int_part;
+                    if (channel_idx < 3 && is_pct) {
+                        val = int_part; // percentage for S/L
+                    }
+                    // Alpha
+                    if (channel_idx == 3) {
+                        if (frac_div > 1) {
+                            double alpha_f = int_part + (double)frac_part / frac_div;
+                            a = (int)(alpha_f * 255 + 0.5);
+                        } else if (is_pct) {
+                            a = (int_part * 255 + 50) / 100;
+                        } else {
+                            a = std::min(255, int_part * 255);
+                        }
+                        a = std::max(0, std::min(255, a));
+                    } else {
+                        val = std::max(0, std::min(channel_idx == 0 ? 360 : 100, int_part));
+                    }
+                    if (channel_idx == 0) h = val;
+                    else if (channel_idx == 1) s = val;
+                    else if (channel_idx == 2) l = val;
+
+                    while (j < value.size() && is_whitespace(value[j])) j++;
+                    if (j < value.size() && value[j] == ',') { j++; continue; }
+                    if (j < value.size() && value[j] == ')') { j++; break; }
+                    if (j >= value.size() || value[j] != ')') { parse_ok = false; break; }
+                }
+
+                while (j < value.size() && is_whitespace(value[j])) j++;
+                if (j < value.size() && value[j] == ')') j++;
+
+                if (parse_ok && channel_idx + 1 >= (is_hsla ? 4 : 3)) {
+                    // Convert HSL to RGB
+                    int channels[4];
+                    double dh = (double)h / 360.0;
+                    double ds = (double)s / 100.0;
+                    double dl = (double)l / 100.0;
+
+                    if (s == 0) {
+                        int gray = (int)(dl * 255 + 0.5);
+                        channels[0] = channels[1] = channels[2] = gray;
+                    } else {
+                        auto hue2rgb = [](double p, double q, double t) -> double {
+                            if (t < 0) t += 1;
+                            if (t > 1) t -= 1;
+                            if (t < 1.0/6.0) return p + (q - p) * 6 * t;
+                            if (t < 0.5) return q;
+                            if (t < 2.0/3.0) return p + (q - p) * (2.0/3.0 - t) * 6;
+                            return p;
+                        };
+                        double q = dl < 0.5 ? dl * (1 + ds) : dl + ds - dl * ds;
+                        double p = 2 * dl - q;
+                        channels[0] = (int)(hue2rgb(p, q, dh + 1.0/3.0) * 255 + 0.5);
+                        channels[1] = (int)(hue2rgb(p, q, dh) * 255 + 0.5);
+                        channels[2] = (int)(hue2rgb(p, q, dh - 1.0/3.0) * 255 + 0.5);
+                    }
+                    channels[0] = std::max(0, std::min(255, channels[0]));
+                    channels[1] = std::max(0, std::min(255, channels[1]));
+                    channels[2] = std::max(0, std::min(255, channels[2]));
+                    channels[3] = a;
+
+                    // Build hex output (shared with rgb/rgba logic)
+                    static const char hexdigits[] = "0123456789abcdef";
+                    char hex[10];
+                    hex[0] = '#';
+                    hex[1] = hexdigits[(channels[0] >> 4) & 0xF];
+                    hex[2] = hexdigits[channels[0] & 0xF];
+                    hex[3] = hexdigits[(channels[1] >> 4) & 0xF];
+                    hex[4] = hexdigits[channels[1] & 0xF];
+                    hex[5] = hexdigits[(channels[2] >> 4) & 0xF];
+                    hex[6] = hexdigits[channels[2] & 0xF];
+
+                    if (is_hsla && channels[3] < 255) {
+                        hex[7] = hexdigits[(channels[3] >> 4) & 0xF];
+                        hex[8] = hexdigits[channels[3] & 0xF];
+                        hex[9] = '\0';
+                        if (hex[1] == hex[2] && hex[3] == hex[4] && hex[5] == hex[6] && hex[7] == hex[8]) {
+                            result += '#';
+                            result += hex[1];
+                            result += hex[3];
+                            result += hex[5];
+                            result += hex[7];
+                        } else {
+                            result += hex;
+                        }
+                    } else {
+                        hex[7] = '\0';
+                        if (hex[1] == hex[2] && hex[3] == hex[4] && hex[5] == hex[6]) {
+                            std::string hex6 = {hex[1], hex[1], hex[3], hex[3], hex[5], hex[5]};
+                            auto nc = NAMED_COLOR.find(hex6);
+                            if (nc != NAMED_COLOR.end() && nc->second.size() < 4) {
+                                result += nc->second;
+                            } else {
+                                result += '#';
+                                result += hex[1];
+                                result += hex[3];
+                                result += hex[5];
+                            }
+                        } else {
+                            std::string hex6(hex + 1, 6);
+                            auto nc = NAMED_COLOR.find(hex6);
+                            if (nc != NAMED_COLOR.end() && nc->second.size() < 7) {
+                                result += nc->second;
+                            } else {
+                                result += hex;
+                            }
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
         if (is_ident_char(value[i]) && !is_digit(value[i]) &&
             (i == 0 || !is_ident_char(value[i-1]))) {
             size_t token_end = i;
