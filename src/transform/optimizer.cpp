@@ -119,6 +119,136 @@ static size_t strip_var_keywords(std::string& js) {
     return removed;
 }
 
+// ---- Replace `undefined` with `void 0` ----
+// In expressions, `undefined` is 9 bytes while `void 0` is 6, saving 3
+// bytes per occurrence. Only replaces the global `undefined` identifier
+// (skips property accesses like `obj.undefined`, declarations, parameters,
+// and occurrences within string literals or comments).
+static size_t replace_undefined_with_void(std::string& js) {
+    // Pre-scan string ranges to skip `undefined` inside strings
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    const std::string target = "undefined";
+    size_t replacements = 0;
+
+    // Find all positions of 'undefined' first (scanning left to right),
+    // then replace from right to left to avoid position shift issues.
+    std::vector<size_t> positions;
+    size_t pos = 0;
+    while ((pos = js.find(target, pos)) != std::string::npos) {
+        // Skip if inside a string literal
+        if (inside_string(pos)) { pos += target.size(); continue; }
+
+        // Skip if preceded by a '.' (property access: obj.undefined)
+        if (pos > 0 && js[pos - 1] == '.') { pos += target.size(); continue; }
+
+        // Skip if part of a larger identifier (rare but for safety)
+        if (pos > 0 && is_ident(js[pos - 1])) { pos += target.size(); continue; }
+        if (pos + target.size() < js.size() && is_ident(js[pos + target.size()])) {
+            pos += target.size(); continue;
+        }
+
+        // Skip if this is a declaration: var/let/const undefined = ...
+        // or a function/arrow parameter: (undefined), function(undefined), (undefined)=>{} etc.
+        // Scan backwards for var/let/const/function keyword before any non-whitespace.
+        // Also check for parameter position (preceded by '(' or ',').
+        bool is_decl = false;
+        {
+            size_t scan = pos;
+            while (scan > 0 && (js[scan - 1] == ' ' || js[scan - 1] == '\t' || js[scan - 1] == '\n' || js[scan - 1] == '\r'))
+                scan--;
+            // Check for var/let/const
+            if (scan >= 3 && js.compare(scan - 3, 3, "var") == 0) {
+                if (scan >= 4 && is_ident(js[scan - 4])) { /* nope */ }
+                else is_decl = true;
+            }
+            if (scan >= 3 && js.compare(scan - 3, 3, "let") == 0) {
+                if (scan >= 4 && is_ident(js[scan - 4])) { /* nope */ }
+                else is_decl = true;
+            }
+            if (scan >= 5 && js.compare(scan - 5, 5, "const") == 0) {
+                if (scan >= 6 && is_ident(js[scan - 6])) { /* nope */ }
+                else is_decl = true;
+            }
+            // Check for function/arrow parameter: (undefined, ...) or ,undefined)
+            // scan > 0: there's at least one char before the identifier.
+            if (scan > 0 && (js[scan - 1] == '(' || js[scan - 1] == ',')) {
+                // Check backwards for 'function' keyword (possibly with a name)
+                // kw should point to the '(' or ',' to start scanning backwards
+                size_t kw = scan;
+                // Skip past '(' or ',' to look for function name before it
+                if (kw > 0 && (js[kw - 1] == '(' || js[kw - 1] == ','))
+                    kw--;
+                // Now skip whitespace and identifiers backward to find 'function'
+                while (kw > 0 && (js[kw - 1] == ' ' || js[kw - 1] == '\t' || js[kw - 1] == '\n' || js[kw - 1] == '\r'))
+                    kw--;
+                // Skip the optional function name: 'function f(' => skip 'f'
+                while (kw > 0 && is_ident(js[kw - 1]))
+                    kw--;
+                // Skip whitespace between name and 'function'
+                while (kw > 0 && (js[kw - 1] == ' ' || js[kw - 1] == '\t' || js[kw - 1] == '\n' || js[kw - 1] == '\r'))
+                    kw--;
+                if (kw >= 8 && js.compare(kw - 8, 8, "function") == 0) {
+                    is_decl = true;
+                } else {
+                    // Arrow function parameter: (undefined)=> or (a,undefined)=> or (undefined,...)
+                    // Forward-scan past this identifier to find ) or , then =>
+                    size_t fwd = pos + target.size();
+                    while (fwd < js.size() && (js[fwd] == ' ' || js[fwd] == '\t' || js[fwd] == '\n' || js[fwd] == '\r'))
+                        fwd++;
+                    if (fwd < js.size() && (js[fwd] == ')' || js[fwd] == ',')) {
+                        // Find matching closing paren and arrow
+                        size_t arrow_scan = fwd;
+                        int depth = (js[fwd] == ')') ? 0 : 1;
+                        if (js[fwd] == ',') {
+                            // Advance past remaining params to find closing )
+                            while (arrow_scan < js.size() && depth > 0) {
+                                arrow_scan++;
+                                if (arrow_scan >= js.size()) break;
+                                if (js[arrow_scan] == '(') depth++;
+                                else if (js[arrow_scan] == ')') depth--;
+                            }
+                        }
+                        // Now at ')' (or past it), skip to look for =>
+                        while (arrow_scan < js.size() && (js[arrow_scan] == ' ' || js[arrow_scan] == '\t' || js[arrow_scan] == '\n' || js[arrow_scan] == '\r' || js[arrow_scan] == ')'))
+                            arrow_scan++;
+                        if (arrow_scan + 1 < js.size() && js[arrow_scan] == '=' && js[arrow_scan + 1] == '>')
+                            is_decl = true;
+                    }
+                }
+            }
+        }
+        if (is_decl) { pos += target.size(); continue; }
+
+        positions.push_back(pos);
+        pos += target.size();
+    }
+
+    // Replace from right to left (replacing 9 chars with 6 chars shifts earlier
+    // positions, but since we're moving right-to-left, already-collected
+    // positions are unaffected).
+    for (auto it = positions.rbegin(); it != positions.rend(); ++it) {
+        js.replace(*it, target.size(), "void 0");
+        replacements++;
+    }
+
+    return replacements;
+}
+
 // ---- Strip orphan top-level assignments ----
 // After var stripping, a dead `var x = 1;` becomes `x = 1;` — an assignment
 // whose target is never read elsewhere. Scan top-level (depth 0) for
@@ -1292,6 +1422,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
 
         // Strip console.*() calls
         strip_console_calls(opt_js);
+        // Replace `undefined` with `void 0` (9→6 bytes per occurrence)
+        replace_undefined_with_void(opt_js);
         // Strip functions that became empty after console call removal
         strip_empty_functions(opt_js);
         // Strip functions that became unreferenced after console stripping
