@@ -44,6 +44,21 @@ bool Optimizer::pass_css_minify(UnifiedDocument& doc) {
                     changed = true;
                 }
             }
+
+            // Map "none" → "0" for border/outline shorthands (equivalent rendering, saves 2 chars)
+            // Safe: border:0 sets width to 0, same visual result as border:none
+            // Not applied to border-style sub-properties — "0" is not a valid style value
+            if (val == "none") {
+                if (decl.property == std::string_view("border") ||
+                    decl.property == std::string_view("border-top") ||
+                    decl.property == std::string_view("border-right") ||
+                    decl.property == std::string_view("border-bottom") ||
+                    decl.property == std::string_view("border-left") ||
+                    decl.property == std::string_view("outline")) {
+                    decl.value = doc.string_pool().intern("0");
+                    changed = true;
+                }
+            }
         }
     }
 
