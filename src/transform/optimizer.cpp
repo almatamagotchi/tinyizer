@@ -1483,10 +1483,10 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         if (config_.enable_cross_identifier && pass_cross_identifier(doc))
             changed_this_iteration = true;
 
-        if (config_.enable_css_shorthand && pass_css_shorthand(doc))
+        if (config_.enable_css_shorthand && pass_css_value_fold(doc))
             changed_this_iteration = true;
 
-        if (config_.enable_css_shorthand && pass_css_value_fold(doc))
+        if (config_.enable_css_shorthand && pass_css_shorthand(doc))
             changed_this_iteration = true;
 
         if (config_.enable_css_shorthand && pass_css_math_fold(doc))
