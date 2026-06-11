@@ -330,6 +330,7 @@ std::unique_ptr<JSNode> JSParser::parse_function_declaration() {
 
     // Enter function scope for the body
     auto func_scope = std::make_unique<JSScope>(JSScope::Kind::FUNCTION, scope_);
+    if (!name.empty()) func_scope->set_function_name(std::string(name));
     // Add parameters to scope
     for (auto& child : func->children) {
         if (child->is_declaration && child->type == JSNodeType::IDENTIFIER) {

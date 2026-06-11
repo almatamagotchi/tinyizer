@@ -237,6 +237,56 @@ window.onload = greet;
         OK();
     }
 
+    {
+        TEST("dead function elimination: mutually recursive dead functions");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        JSParser js_parser;
+
+        // a() and b() call each other, but nothing else calls either.
+        // Both should be eliminated. greet() is alive (referenced from global scope).
+        std::string html = R"(<!DOCTYPE html><html><body><script>
+function a() { console.log("a"); b(); }
+function b() { console.log("b"); a(); }
+function greet() { console.log("hello"); }
+greet();
+</script></body></html>)";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+
+        auto inline_js = html_parser.take_inline_scripts();
+        for (auto& js : inline_js) {
+            doc.add_inline_script(js);
+            js_parser.parse(js, doc.js_root_scope());
+        }
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_dead_js = true;
+        config.max_iterations = 5;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+
+        // a() and b() should be removed, greet() should survive
+        bool has_greet = output.find("greet") != std::string::npos;
+        bool has_a_func = output.find("function a") != std::string::npos;
+        bool has_b_func = output.find("function b") != std::string::npos;
+
+        std::cout << "greet present: " << (has_greet ? "yes" : "no") << "\n";
+        std::cout << "function a present: " << (has_a_func ? "yes" : "no") << "\n";
+        std::cout << "function b present: " << (has_b_func ? "yes" : "no") << "\n";
+        std::cout << "Output: " << output << "\n";
+
+        assert(has_greet);
+        assert(!has_a_func);
+        assert(!has_b_func);
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }

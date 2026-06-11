@@ -49,20 +49,28 @@ void JSScope::declare_function(std::string_view name, const std::vector<std::str
     for (auto p : params) fn.param_names.push_back(std::string(p));
     if (exported) fn.is_exported = true;
     // If this function was referenced before its declaration (hoisting),
-    // mark it as referenced.
+    // mark it as referenced and copy over callers.
     if (pending_function_refs_.count(key)) {
         fn.is_referenced = true;
+        // Copy any callers recorded before the declaration
+        auto cit = pending_function_callers_.find(key);
+        if (cit != pending_function_callers_.end()) {
+            fn.callers = std::move(cit->second);
+            pending_function_callers_.erase(cit);
+        }
         pending_function_refs_.erase(key);
     }
 }
 
 void JSScope::reference_function(std::string_view name) {
     std::string key(name);
+    std::string caller = enclosing_function_name();
     JSScope* scope = this;
     while (scope) {
         auto it = scope->functions_.find(key);
         if (it != scope->functions_.end()) {
             it->second.is_referenced = true;
+            it->second.callers.insert(caller);
             return;
         }
         scope = scope->parent_;
@@ -71,6 +79,9 @@ void JSScope::reference_function(std::string_view name) {
     // When the function declaration is later processed (hoisting),
     // declare_function will check this set and mark it as referenced.
     pending_function_refs_.insert(std::move(key));
+    // Also record the caller for the pending ref (applied when declared).
+    // Store in a separate pending-callers map.
+    pending_function_callers_[key].insert(caller);
 }
 
 JSScope::FunctionInfo* JSScope::find_function(std::string_view name) {
@@ -104,6 +115,17 @@ JSScope* JSScope::add_child(std::unique_ptr<JSScope> child) {
     JSScope* raw = child.get();
     children_.push_back(std::move(child));
     return raw;
+}
+
+std::string JSScope::enclosing_function_name() const {
+    const JSScope* s = this;
+    while (s) {
+        if (s->kind_ == Kind::FUNCTION) {
+            return s->func_name_;
+        }
+        s = s->parent_;
+    }
+    return "";  // global scope
 }
 
 } // namespace tinyizer

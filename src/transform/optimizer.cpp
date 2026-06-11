@@ -3,6 +3,7 @@
 #include "../util/frequency_map.h"
 #include "../parser/tokenizer.h"
 #include "../parser/js_parser.h"
+#include <queue>
 #include <algorithm>
 #include <set>
 #include <sstream>
@@ -1606,17 +1607,51 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // variables that were only read by now-removed dead code become
         // dead themselves.  Re-parse + re-eliminate until convergence.
         {
-            // Lambda to collect unreferenced names from a scope tree
+            // Lambda to collect unreferenced names from a scope tree.
+            // Uses reachability analysis for functions: a function is alive
+            // if reachable from global scope or an exported/live function.
+            // This correctly handles mutually-recursive dead functions.
             auto collect_dead = [](const JSScope* scope,
-                                   std::unordered_set<std::string>& dead,
-                                   auto& self) -> void {
+                                    std::unordered_set<std::string>& dead,
+                                    auto& self) -> void {
                 if (!scope) return;
+
+                // Collect all function infos for reachability analysis
+                std::unordered_map<std::string, const JSScope::FunctionInfo*> all_fns;
+                auto gather_fns = [&all_fns](const JSScope* s, auto& gf) -> void {
+                    if (!s) return;
+                    for (const auto& [n, f] : s->functions()) all_fns[n] = &f;
+                    for (const auto& c : s->children()) gf(c.get(), gf);
+                };
+                gather_fns(scope, gather_fns);
+
+                // Reachability-based liveness
+                std::queue<std::string> work;
+                std::unordered_set<std::string> live;
+                for (const auto& [name, fn] : all_fns) {
+                    if (fn->is_exported || fn->callers.count("")) {
+                        live.insert(name);
+                        work.push(name);
+                    }
+                }
+                while (!work.empty()) {
+                    std::string cur = work.front();
+                    work.pop();
+                    for (const auto& [name, fn] : all_fns) {
+                        if (live.count(name)) continue;
+                        if (fn->callers.count(cur)) {
+                            live.insert(name);
+                            work.push(name);
+                        }
+                    }
+                }
+
                 for (const auto& [name, var] : scope->variables()) {
                     if (var.is_declared && !var.is_referenced && !var.is_exported)
                         dead.insert(name);
                 }
                 for (const auto& [name, fn] : scope->functions()) {
-                    if (!fn.is_referenced && !fn.is_exported)
+                    if (!live.count(name))
                         dead.insert(name);
                 }
                 for (const auto& child : scope->children())

@@ -29,6 +29,9 @@ public:
         std::vector<std::string> param_names;
         bool is_referenced = false;
         bool is_exported = false;
+        // Which functions/scopes reference this function.
+        // Empty string key "" = referenced from global (non-function) scope.
+        std::unordered_set<std::string> callers;
     };
 
     JSScope(Kind kind, JSScope* parent = nullptr);
@@ -46,6 +49,9 @@ public:
     void reference_function(std::string_view name);
     FunctionInfo* find_function(std::string_view name);
 
+    // Returns the name of the nearest enclosing FUNCTION scope, or empty if global.
+    std::string enclosing_function_name() const;
+
     // Walk all declared names (for identifier squeezing)
     std::vector<std::string_view> all_declared_names() const;
 
@@ -54,6 +60,9 @@ public:
     const std::unordered_map<std::string, FunctionInfo>& functions() const { return functions_; }
 
     JSScope* add_child(std::unique_ptr<JSScope> child);
+
+    // Set the function name for FUNCTION-kind scopes (used for call-graph tracking)
+    void set_function_name(std::string name) { func_name_ = std::move(name); }
 
     const std::vector<std::unique_ptr<JSScope>>& children() const { return children_; }
 
@@ -68,6 +77,11 @@ private:
     // it marks the declaration as referenced.
     std::unordered_set<std::string> pending_variable_refs_;
     std::unordered_set<std::string> pending_function_refs_;
+    // Callers for functions referenced before declaration (hoisting).
+    // Keyed by function name, value = set of caller names.
+    std::unordered_map<std::string, std::unordered_set<std::string>> pending_function_callers_;
+    // Name of the enclosing function (only set for FUNCTION-kind scopes).
+    std::string func_name_;
 };
 
 } // namespace tinyizer
