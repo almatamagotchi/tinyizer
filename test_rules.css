@@ -2,3 +2,13 @@ body { color: red; background-color: #ffffff; margin-top: 0; margin-right: auto;
 .unused { display: none; color: blue; }
 .header { padding-top: 10px; padding-right: 20px; padding-bottom: 10px; padding-left: 20px; background-color: #ff0000; }
 #main-title { font-weight: bold; }
+#box-model-test {
+    margin: 0 0 0 0;
+    padding: 1px 2px 1px 2px;
+    border-width: 2px 1px;
+    border-style: solid solid solid solid;
+    border-color: black black;
+    border-radius: 10px 10px;
+    scroll-margin: 5px 5px 5px 5px;
+    scroll-padding: 20px 20px;
+}

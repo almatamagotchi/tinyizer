@@ -893,9 +893,12 @@ bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
     static const std::unordered_set<std::string_view> BOX_MODEL_PROPS = {
         "margin", "padding",
         "border-width", "border-style", "border-color",
+        "border-image-width", "border-image-outset",
         "margin-inline", "margin-block", "padding-inline", "padding-block",
         "outline-width", "outline-style", "outline-color",
-        "border-radius", "inset", "gap", "grid-gap",
+        "border-radius", "inset", "gap",
+        "scroll-margin", "scroll-padding",
+        "mask-border-width", "mask-border-outset",
     };
 
     for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
