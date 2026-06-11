@@ -22,6 +22,7 @@ public:
         bool is_declared = false;   // let/var/const/function declared here
         bool is_referenced = false;  // actually used somewhere
         bool is_exported = false;    // exported or attached to global
+        std::string const_value;     // literal value for const bindings (empty = not const or non-literal)
     };
 
     struct FunctionInfo {
@@ -41,6 +42,7 @@ public:
 
     // Variable tracking — takes string_view but copies to internal std::string
     void declare_variable(std::string_view name, bool exported = false);
+    void set_const_value(std::string_view name, std::string_view value);
     void reference_variable(std::string_view name);
     Variable* find_variable(std::string_view name);
 

@@ -240,6 +240,7 @@ std::unique_ptr<JSNode> JSParser::parse_block() {
 std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
     size_t start = tok_->pos();
     std::string_view keyword = tok_->read_identifier(); // var, let, const
+    bool is_const = (keyword == "const");
     auto decl = std::make_unique<JSNode>(JSNodeType::VAR_DECL);
     decl->value = keyword;
 
@@ -249,6 +250,8 @@ std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
     while (!tok_->eof()) {
         skip_comments_and_whitespace();
         if (tok_->eof() || tok_->peek() == ';') break;
+
+        std::string_view last_name;
 
         // Destructuring: [a, b] = ... or {a, b} = ...
         if (tok_->peek() == '[') {
@@ -262,12 +265,12 @@ std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
         } else {
             // Simple identifier
             size_t id_start = tok_->pos();
-            std::string_view name = tok_->read_identifier();
-            auto id = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, name);
+            last_name = tok_->read_identifier();
+            auto id = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, last_name);
             id->is_declaration = true;
             decl->children.push_back(stamp_node(std::move(id), id_start));
 
-            if (scope_) scope_->declare_variable(name);
+            if (scope_) scope_->declare_variable(last_name);
         }
 
         skip_comments_and_whitespace();
@@ -276,8 +279,16 @@ std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
         if (tok_->peek() == '=') {
             tok_->advance();
             skip_comments_and_whitespace();
+            size_t init_start = tok_->pos();
             auto init = parse_expression(1);
-            if (init) decl->children.push_back(std::move(init));
+            if (init) {
+                // Track const literal values for cross-scope propagation
+                if (is_const && !last_name.empty() && scope_ &&
+                    init->type == JSNodeType::LITERAL) {
+                    scope_->set_const_value(last_name, init->value);
+                }
+                decl->children.push_back(stamp_node(std::move(init), init_start));
+            }
         }
 
         // Comma or semicolon

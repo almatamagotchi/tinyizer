@@ -30,6 +30,14 @@ void JSScope::reference_variable(std::string_view name) {
     var.is_referenced = true;
 }
 
+void JSScope::set_const_value(std::string_view name, std::string_view value) {
+    std::string key(name);
+    auto it = variables_.find(key);
+    if (it != variables_.end()) {
+        it->second.const_value = value;
+    }
+}
+
 JSScope::Variable* JSScope::find_variable(std::string_view name) {
     std::string key(name);
     JSScope* scope = this;
