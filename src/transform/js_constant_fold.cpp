@@ -1,10 +1,14 @@
 #include "optimizer.h"
+#include "../parser/js_parser.h"
+#include "../ir/js_scope.h"
 #include <cctype>
 #include <string>
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <regex>
+#include <algorithm>
+#include <functional>
 
 namespace tinyizer {
 
@@ -823,6 +827,63 @@ static std::string strip_unnecessary_parens(const std::string& js) {
     }
     return result;
 } // anonymous namespace
+
+// Walk AST, find const-bound identifier references, and replace them with
+// their literal values in the text. Re-parses to get a fresh scope tree
+// so const_value data is accurate for the current JS state.
+std::string propagate_const_literals(const std::string& js) {
+    if (js.empty()) return js;
+
+    // Re-parse to get fresh AST and scope tree
+    JSScope scope(JSScope::Kind::GLOBAL);
+    JSParser parser;
+    auto ast = parser.parse(js, &scope);
+    if (!ast) return js;
+
+    // Walk AST to find const-bound identifier references
+    struct Replacement {
+        size_t start;
+        size_t end;
+        std::string value;
+    };
+    std::vector<Replacement> reps;
+
+    std::function<void(const JSNode*)> walk = [&](const JSNode* node) {
+        if (!node) return;
+        if (node->type == JSNodeType::IDENTIFIER && node->is_reference) {
+            if (node->scope) {
+                auto* var = node->scope->find_variable(node->value);
+                if (var && !var->const_value.empty()) {
+                    reps.push_back({
+                        node->src_start,
+                        node->src_end,
+                        std::string(var->const_value)
+                    });
+                }
+            }
+        }
+        for (const auto& child : node->children) {
+            walk(child.get());
+        }
+    };
+    walk(ast.get());
+
+    if (reps.empty()) return js;
+
+    // Sort descending by start position so replacements don't shift
+    // positions of remaining items.
+    std::sort(reps.begin(), reps.end(),
+              [](const Replacement& a, const Replacement& b) {
+                  return a.start > b.start;
+              });
+
+    std::string result = js;
+    for (const auto& r : reps) {
+        result.replace(r.start, r.end - r.start, r.value);
+    }
+
+    return result;
+}
 
 std::string fold_constants_in_text(const std::string& js) {
     // Apply all text-based constant folding passes

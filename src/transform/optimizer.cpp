@@ -3,6 +3,7 @@
 #include "../util/frequency_map.h"
 #include "../parser/tokenizer.h"
 #include "../parser/js_parser.h"
+#include <functional>
 #include <queue>
 #include <algorithm>
 #include <set>
@@ -728,11 +729,27 @@ static size_t inline_single_use_variables(std::string& js) {
         // Adjust positions if replacement shifted things
         size_t shift = literal.size() - ident.size();
 
-        // Remove the assignment statement
+        // Remove the assignment statement, including any preceding keyword
+        // (const, let, var), whitespace, and semicolon.
         size_t erase_start = id_start;
+        // First eat whitespace and semicolons
         while (erase_start > 0 && (js[erase_start - 1] == ' ' || js[erase_start - 1] == ';')) {
             if (js[erase_start - 1] == ';') { erase_start--; break; }
             erase_start--;
+        }
+        // Then eat the declaration keyword if present: the keyword is immediately
+        // before the identifier (possibly with whitespace between). E.g.,
+        // "const X=" → erase_start should move past "const ".
+        if (erase_start >= 5 && js.compare(erase_start - 5, 5, "const") == 0) {
+            erase_start -= 5;
+            // Also eat the space(s) between keyword and identifier
+            while (erase_start > 0 && js[erase_start - 1] == ' ') erase_start--;
+        } else if (erase_start >= 3 && js.compare(erase_start - 3, 3, "let") == 0) {
+            erase_start -= 3;
+            while (erase_start > 0 && js[erase_start - 1] == ' ') erase_start--;
+        } else if (erase_start >= 3 && js.compare(erase_start - 3, 3, "var") == 0) {
+            erase_start -= 3;
+            while (erase_start > 0 && js[erase_start - 1] == ' ') erase_start--;
         }
         size_t erase_len = (stmt_end + 1) - erase_start;
         if (read_pos > stmt_end) {
@@ -1602,6 +1619,14 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         strip_empty_functions(opt_js);
         strip_unreferenced_functions(opt_js);
 
+        // ---- Const literal propagation ----
+        // Replace const-bound identifier references with their literal values
+        // (e.g., const X=1; foo(X); bar(X) → foo(1); bar(1)).
+        // Multi-use consts are not handled by inline_single_use_variables.
+        // Re-parses to get a fresh AST/scope tree with correct positions.
+        // The cascade loop below will then remove the now-orphaned declarations.
+        opt_js = propagate_const_literals(opt_js);
+
         // ---- Cascading dead-code re-elimination ----
         // After console stripping, function stripping, and var stripping,
         // variables that were only read by now-removed dead code become
@@ -1669,6 +1694,26 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
 
                 std::unordered_set<std::string> cascade_dead;
                 collect_dead(&fresh_root, cascade_dead, collect_dead);
+
+                // Also collect unreferenced variable names (e.g., const
+                // declarations whose references were replaced by const
+                // propagation). Only the root scope is checked for variables.
+                // No initial count check so we don't skip var-only dead code.
+                {
+                    std::function<void(const JSScope*)> collect_dead_vars =
+                        [&](const JSScope* scope) {
+                            if (!scope) return;
+                            for (const auto& [name, var] : scope->variables()) {
+                                if (var.is_declared && !var.is_referenced) {
+                                    cascade_dead.insert(name);
+                                }
+                            }
+                            for (const auto& child : scope->children()) {
+                                collect_dead_vars(child.get());
+                            }
+                        };
+                    collect_dead_vars(&fresh_root);
+                }
 
                 if (cascade_dead.empty()) break;
 

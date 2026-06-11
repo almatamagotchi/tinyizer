@@ -268,6 +268,7 @@ std::unique_ptr<JSNode> JSParser::parse_var_declaration() {
             last_name = tok_->read_identifier();
             auto id = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, last_name);
             id->is_declaration = true;
+            id->scope = scope_;
             decl->children.push_back(stamp_node(std::move(id), id_start));
 
             if (scope_) scope_->declare_variable(last_name);
@@ -713,6 +714,7 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
         auto id = std::make_unique<JSNode>(JSNodeType::IDENTIFIER, word);
         id->src_start = id_start;
         id->is_reference = true;
+        id->scope = scope_;
         if (scope_) scope_->reference_variable(word);
 
         // Check for member access (. or [) or call (

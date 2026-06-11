@@ -24,6 +24,12 @@ std::string minify_js_text(const std::string& js);
 // Used as fallback when CSS parser/serializer pipeline is not available.
 std::string minify_css_text(const std::string& css);
 
+// Replace const-bound identifier references with their literal values.
+// Re-parses the JS to build a fresh scope tree, then walks the AST to find
+// const-qualified variables with literal initializers and substitutes their
+// references directly in the text (e.g., const X=1; console.log(X) → console.log(1)).
+std::string propagate_const_literals(const std::string& js);
+
 // Fold constant expressions in JS text: 2+3 → 5, "a"+"b" → "ab", !0 → true.
 // Used by both the iterative pass loop and the final serialization step.
 std::string fold_constants_in_text(const std::string& js);
