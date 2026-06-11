@@ -24,6 +24,10 @@ std::string minify_js_text(const std::string& js);
 // Used as fallback when CSS parser/serializer pipeline is not available.
 std::string minify_css_text(const std::string& css);
 
+// Strip unnecessary quotes from font-family values ("Arial" → Arial).
+// Applied to inline style attributes and CSS declarations.
+std::string strip_font_family_quotes(const std::string& value);
+
 // Replace const-bound identifier references with their literal values.
 // Re-parses the JS to build a fresh scope tree, then walks the AST to find
 // const-qualified variables with literal initializers and substitutes their

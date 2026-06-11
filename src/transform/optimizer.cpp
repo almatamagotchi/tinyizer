@@ -2028,6 +2028,13 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                         // Optimize viewport meta content: fold numeric values like "1.0" -> "1"
                         std::string_view opt_val = attr.value;
                         std::string opt_buf;
+
+                        // Strip unnecessary quotes from font-family in inline style attributes
+                        if (attr.name == "style") {
+                            opt_buf = strip_font_family_quotes(std::string(attr.value));
+                            opt_val = opt_buf;
+                        }
+
                         if (node.tag_name() == "meta" && attr.name == "content") {
                             // Check if this is a viewport meta
                             bool is_viewport = false;

@@ -26,7 +26,7 @@ static bool is_font_family_name_char(char c) {
 // "Arial" -> Arial, 'Georgia' -> Georgia, "Arial","Helvetica" -> Arial,Helvetica
 // Only unquotes when the inner name contains no spaces or special chars
 // and is not a CSS reserved keyword.
-static std::string strip_font_family_quotes(const std::string& value) {
+std::string strip_font_family_quotes(const std::string& value) {
     std::string result;
     result.reserve(value.size());
 
