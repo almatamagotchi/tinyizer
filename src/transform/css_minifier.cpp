@@ -45,6 +45,23 @@ bool Optimizer::pass_css_minify(UnifiedDocument& doc) {
                 }
             }
 
+            // Minify font-stretch keywords to percentage equivalents (CSS Fonts 4).
+            // Percentage values are shorter than keywords in all cases.
+            // e.g., "condensed" -> "75%", "expanded" -> "125%"
+            if (decl.property == std::string_view("font-stretch")) {
+                static const std::unordered_map<std::string_view, std::string_view> stretch = {
+                    {"ultra-condensed", "50%"}, {"extra-condensed", "62.5%"},
+                    {"condensed", "75%"},       {"semi-condensed", "87.5%"},
+                    {"semi-expanded", "112.5%"},{"expanded", "125%"},
+                    {"extra-expanded", "150%"}, {"ultra-expanded", "200%"},
+                };
+                auto it = stretch.find(val);
+                if (it != stretch.end()) {
+                    decl.value = doc.string_pool().intern(it->second);
+                    changed = true;
+                }
+            }
+
             // Strip unnecessary quotes from font-family names
             // "Arial" → Arial, 'Georgia' → Georgia (saves 2 bytes)
             // Safe when the name contains no special characters and isn't a CSS keyword
