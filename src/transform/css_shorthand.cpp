@@ -46,6 +46,7 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"place-content", {"align-content", "justify-content"}},
     {"place-items",   {"align-items", "justify-items"}},
     {"place-self",    {"align-self", "justify-self"}},
+    {"text-emphasis", {"text-emphasis-style", "text-emphasis-color"}},
 };
 
 // CSS value minification helpers
@@ -749,6 +750,8 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"inset-block-end", "inset-block"},
         {"inset-inline-start", "inset-inline"},
         {"inset-inline-end", "inset-inline"},
+        {"text-emphasis-style", "text-emphasis"},
+        {"text-emphasis-color", "text-emphasis"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
