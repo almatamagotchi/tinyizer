@@ -741,6 +741,8 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"transition-duration", "transition"},
         {"transition-timing-function", "transition"},
         {"transition-delay", "transition"},
+        {"overflow-x", "overflow"},
+        {"overflow-y", "overflow"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
@@ -945,6 +947,48 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     decls.push_back(sh_decl);
 
                     // Remove merged longhands
+                    for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                        auto pit = prop_map.find(*it);
+                        if (pit != prop_map.end() && pit->second < decls.size()) {
+                            decls.erase(decls.begin() + pit->second);
+                            prop_map.clear();
+                            for (size_t i = 0; i < decls.size(); i++) {
+                                prop_map[decls[i].property] = i;
+                            }
+                        }
+                    }
+
+                    changed = true;
+                }
+            }
+            // Generic 2-value partial merge: when exactly 1 of 2 longhands is
+            // present, promote to shorthand with 1 value (sets both sub-properties
+            // to the same value — aggressive but valid for extreme minification).
+            // This handles overflow, gap, flex-flow, columns, place-*, and any
+            // future 2-value shorthands generically without per-property entries.
+            else if (!has_all && longhands.size() == 2) {
+                // Count present longhands, find the one that IS present
+                size_t present_count = 0;
+                std::string_view present_value;
+                for (size_t li = 0; li < 2; li++) {
+                    auto it = prop_map.find(longhands[li]);
+                    if (it != prop_map.end()) {
+                        present_count++;
+                        present_value = decls[it->second].value;
+                    }
+                }
+
+                // Only merge if exactly 1 longhand is present.
+                // (2 present = full merge already handled above.)
+                if (present_count == 1) {
+                    std::string sh_value = minify_css_value(std::string(present_value));
+
+                    CSSRule::Declaration sh_decl;
+                    sh_decl.property = doc.string_pool().intern(shorthand);
+                    sh_decl.value = doc.string_pool().intern(sh_value);
+                    decls.push_back(sh_decl);
+
+                    // Remove the single merged longhand
                     for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
                         auto pit = prop_map.find(*it);
                         if (pit != prop_map.end() && pit->second < decls.size()) {
