@@ -815,6 +815,56 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
 
                 changed = true;
             }
+            // Partial merge: for 4-value families (margin, padding, inset, border-radius,
+            // border-width), merge when ≥2 longhands are present, using "0" for missing
+            // sides (initial values are 0). Skip border-style and border-color where
+            // initial is not 0.
+            else if (!has_all && longhands.size() == 4) {
+                static const std::unordered_set<std::string_view> PARTIAL_4_UNSAFE = {
+                    "border-style", "border-color"
+                };
+                if (PARTIAL_4_UNSAFE.find(shorthand) == PARTIAL_4_UNSAFE.end()) {
+                    // Count how many longhands are present and build the 4-value string
+                    std::string_view values[4];
+                    size_t present_count = 0;
+                    for (size_t li = 0; li < 4; li++) {
+                        auto it = prop_map.find(longhands[li]);
+                        if (it != prop_map.end()) {
+                            values[li] = decls[it->second].value;
+                            present_count++;
+                        } else {
+                            values[li] = "0";
+                        }
+                    }
+
+                    // Need at least 2 longhands for the merge to be worthwhile
+                    if (present_count >= 2) {
+                        std::string sh_value = std::string(values[0]) + " " + std::string(values[1]) +
+                                               " " + std::string(values[2]) + " " + std::string(values[3]);
+
+                        sh_value = minify_css_value(sh_value);
+
+                        CSSRule::Declaration sh_decl;
+                        sh_decl.property = doc.string_pool().intern(shorthand);
+                        sh_decl.value = doc.string_pool().intern(sh_value);
+                        decls.push_back(sh_decl);
+
+                        // Remove merged longhands (reverse order for stable indices)
+                        for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                            auto pit = prop_map.find(*it);
+                            if (pit != prop_map.end() && pit->second < decls.size()) {
+                                decls.erase(decls.begin() + pit->second);
+                                prop_map.clear();
+                                for (size_t j = 0; j < decls.size(); j++) {
+                                    prop_map[decls[j].property] = j;
+                                }
+                            }
+                        }
+
+                        changed = true;
+                    }
+                }
+            }
             // Partial merge: for 3-component shorthands (border/outline/border-*),
             // merge when border-style (required) plus at least width or color are present.
             // Missing components keep their initial values, so the shorthand is equivalent.
