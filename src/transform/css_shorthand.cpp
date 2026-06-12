@@ -928,37 +928,45 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 bool has_color = (c_it != prop_map.end());
 
                 if (has_style && (has_width || has_color)) {
-                    std::string sh_value;
-                    if (has_width) {
-                        sh_value = std::string(decls[w_it->second].value);
-                    }
-                    if (!sh_value.empty()) sh_value += ' ';
-                    sh_value += std::string(decls[s_it->second].value);
-                    if (has_color) {
-                        sh_value += ' ';
-                        sh_value += std::string(decls[c_it->second].value);
-                    }
+                    // Cascade-safe check: don't merge if a later rule
+                    // targeting the same selector sets a missing longhand
+                    // (e.g., border-width + border-style → border would
+                    //  override a later border-color on the same selector).
+                    if (!partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                        // skip: merge would override later declarations
+                    } else {
+                        std::string sh_value;
+                        if (has_width) {
+                            sh_value = std::string(decls[w_it->second].value);
+                        }
+                        if (!sh_value.empty()) sh_value += ' ';
+                        sh_value += std::string(decls[s_it->second].value);
+                        if (has_color) {
+                            sh_value += ' ';
+                            sh_value += std::string(decls[c_it->second].value);
+                        }
 
-                    sh_value = minify_css_value(sh_value);
+                        sh_value = minify_css_value(sh_value);
 
-                    CSSRule::Declaration sh_decl;
-                    sh_decl.property = doc.string_pool().intern(shorthand);
-                    sh_decl.value = doc.string_pool().intern(sh_value);
-                    decls.push_back(sh_decl);
+                        CSSRule::Declaration sh_decl;
+                        sh_decl.property = doc.string_pool().intern(shorthand);
+                        sh_decl.value = doc.string_pool().intern(sh_value);
+                        decls.push_back(sh_decl);
 
-                    // Remove merged longhands
-                    for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
-                        auto pit = prop_map.find(*it);
-                        if (pit != prop_map.end() && pit->second < decls.size()) {
-                            decls.erase(decls.begin() + pit->second);
-                            prop_map.clear();
-                            for (size_t i = 0; i < decls.size(); i++) {
-                                prop_map[decls[i].property] = i;
+                        // Remove merged longhands
+                        for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                            auto pit = prop_map.find(*it);
+                            if (pit != prop_map.end() && pit->second < decls.size()) {
+                                decls.erase(decls.begin() + pit->second);
+                                prop_map.clear();
+                                for (size_t i = 0; i < decls.size(); i++) {
+                                    prop_map[decls[i].property] = i;
+                                }
                             }
                         }
-                    }
 
-                    changed = true;
+                        changed = true;
+                    }
                 }
             }
             // Generic 2-value partial merge: when exactly 1 of 2 longhands is
@@ -981,26 +989,32 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 // Only merge if exactly 1 longhand is present.
                 // (2 present = full merge already handled above.)
                 if (present_count == 1) {
-                    std::string sh_value = minify_css_value(std::string(present_value));
+                    // Cascade-safe check: don't merge if a later rule
+                    // targeting the same selector sets the missing longhand.
+                    if (!partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                        // skip: merge would override later declarations
+                    } else {
+                        std::string sh_value = minify_css_value(std::string(present_value));
 
-                    CSSRule::Declaration sh_decl;
-                    sh_decl.property = doc.string_pool().intern(shorthand);
-                    sh_decl.value = doc.string_pool().intern(sh_value);
-                    decls.push_back(sh_decl);
+                        CSSRule::Declaration sh_decl;
+                        sh_decl.property = doc.string_pool().intern(shorthand);
+                        sh_decl.value = doc.string_pool().intern(sh_value);
+                        decls.push_back(sh_decl);
 
-                    // Remove the single merged longhand
-                    for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
-                        auto pit = prop_map.find(*it);
-                        if (pit != prop_map.end() && pit->second < decls.size()) {
-                            decls.erase(decls.begin() + pit->second);
-                            prop_map.clear();
-                            for (size_t i = 0; i < decls.size(); i++) {
-                                prop_map[decls[i].property] = i;
+                        // Remove the single merged longhand
+                        for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                            auto pit = prop_map.find(*it);
+                            if (pit != prop_map.end() && pit->second < decls.size()) {
+                                decls.erase(decls.begin() + pit->second);
+                                prop_map.clear();
+                                for (size_t i = 0; i < decls.size(); i++) {
+                                    prop_map[decls[i].property] = i;
+                                }
                             }
                         }
-                    }
 
-                    changed = true;
+                        changed = true;
+                    }
                 }
             }
         }
