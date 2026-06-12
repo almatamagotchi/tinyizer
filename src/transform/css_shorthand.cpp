@@ -41,6 +41,8 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"flex-flow",    {"flex-direction", "flex-wrap"}},
     {"columns",      {"column-width", "column-count"}},
     {"inset",        {"top", "right", "bottom", "left"}},
+    {"inset-block",  {"inset-block-start", "inset-block-end"}},
+    {"inset-inline", {"inset-inline-start", "inset-inline-end"}},
     {"place-content", {"align-content", "justify-content"}},
     {"place-items",   {"align-items", "justify-items"}},
     {"place-self",    {"align-self", "justify-self"}},
@@ -743,6 +745,10 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"transition-delay", "transition"},
         {"overflow-x", "overflow"},
         {"overflow-y", "overflow"},
+        {"inset-block-start", "inset-block"},
+        {"inset-block-end", "inset-block"},
+        {"inset-inline-start", "inset-inline"},
+        {"inset-inline-end", "inset-inline"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
@@ -1098,7 +1104,7 @@ bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
         "border-image-width", "border-image-outset",
         "margin-inline", "margin-block", "padding-inline", "padding-block",
         "outline-width", "outline-style", "outline-color",
-        "border-radius", "inset", "gap",
+        "border-radius", "inset", "inset-block", "inset-inline", "gap",
         "scroll-margin", "scroll-padding",
         "mask-border-width", "mask-border-outset",
     };
