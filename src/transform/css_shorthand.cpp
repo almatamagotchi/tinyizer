@@ -49,6 +49,8 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"text-emphasis", {"text-emphasis-style", "text-emphasis-color"}},
     {"scroll-margin", {"scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left"}},
     {"scroll-padding", {"scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"}},
+    {"mask",         {"mask-image", "mask-position", "mask-size", "mask-repeat",
+                      "mask-origin", "mask-clip", "mask-mode", "mask-composite"}},
 };
 
 // CSS value minification helpers
@@ -762,6 +764,14 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"scroll-padding-right", "scroll-padding"},
         {"scroll-padding-bottom", "scroll-padding"},
         {"scroll-padding-left", "scroll-padding"},
+        {"mask-image", "mask"},
+        {"mask-position", "mask"},
+        {"mask-size", "mask"},
+        {"mask-repeat", "mask"},
+        {"mask-origin", "mask"},
+        {"mask-clip", "mask"},
+        {"mask-mode", "mask"},
+        {"mask-composite", "mask"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
@@ -820,11 +830,50 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
 
             if (has_all && longhands.size() >= 2) {
                 // Build the shorthand value
+                // shorthands where size must be preceded by "/"
+                static const std::unordered_set<std::string_view> SLASH_BEFORE_SIZE = {
+                    "background", "mask"
+                };
+                // mask: deduplicate origin/clip when equal
+                bool dedup_origin_clip = (shorthand == "mask");
+                std::string_view origin_val, clip_val;
+
                 std::string sh_value;
                 for (size_t li = 0; li < longhands.size(); li++) {
                     auto it = prop_map.find(longhands[li]);
-                    if (it != prop_map.end()) {
-                        if (li > 0) sh_value += ' ';
+                    if (it == prop_map.end()) continue;
+
+                    // Deduplicate mask-origin / mask-clip
+                    if (dedup_origin_clip && longhands[li] == "mask-origin") {
+                        origin_val = decls[it->second].value;
+                        auto clip_it = prop_map.find("mask-clip");
+                        if (clip_it != prop_map.end()) {
+                            clip_val = decls[clip_it->second].value;
+                        }
+                        if (!sh_value.empty()) sh_value += ' ';
+                        sh_value += origin_val;
+                        continue;
+                    }
+                    if (dedup_origin_clip && longhands[li] == "mask-clip") {
+                        if (!clip_val.empty() && origin_val == clip_val) {
+                            // origin and clip are equal — already output origin above
+                            continue;
+                        }
+                        // origin and clip differ — output clip
+                        if (!sh_value.empty()) sh_value += ' ';
+                        sh_value += decls[it->second].value;
+                        continue;
+                    }
+
+                    // Insert "/" before size properties
+                    if (SLASH_BEFORE_SIZE.count(shorthand) &&
+                        (longhands[li] == "background-size" || longhands[li] == "mask-size")) {
+                        if (!sh_value.empty()) sh_value += ' ';
+                        sh_value += '/';
+                        sh_value += ' ';
+                        sh_value += decls[it->second].value;
+                    } else {
+                        if (!sh_value.empty()) sh_value += ' ';
                         sh_value += decls[it->second].value;
                     }
                 }
