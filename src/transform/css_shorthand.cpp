@@ -1082,50 +1082,94 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 }
             }
             // Generic partial merge: for shorthands with >4 longhands
-            // (e.g., font-variant 7, mask 8, transition 4+), merge when
-            // ≥2 longhands are present by joining their values with spaces.
+            // (e.g., font-variant 7, mask 8), merge when ≥2 longhands
+            // are present. Handles SLASH_BEFORE_SIZE for mask/background
+            // (prepends "/" before size longhand). Skips SLASH_BETWEEN_ALL
+            // shorthands (can't partially merge /-separated values).
             else if (!has_all && longhands.size() > 4) {
-                // Count how many longhands are present and collect values
-                std::vector<std::string_view> present_values;
-                for (size_t li = 0; li < longhands.size(); li++) {
-                    auto it = prop_map.find(longhands[li]);
-                    if (it != prop_map.end()) {
-                        present_values.push_back(decls[it->second].value);
-                    }
-                }
-
-                // Need at least 2 longhands for the merge to be worthwhile
-                if (present_values.size() >= 2) {
-                    // Cascade-safe check
-                    if (!partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
-                        // skip: merge would override later declarations
-                    } else {
-                        std::string sh_value;
-                        for (size_t vi = 0; vi < present_values.size(); vi++) {
-                            if (vi > 0) sh_value += ' ';
-                            sh_value += std::string(present_values[vi]);
+                // Skip slash-between-all shorthands (e.g., grid-area)
+                if (shorthand == "grid-row" || shorthand == "grid-column" || shorthand == "grid-area") {
+                    // can't partially merge; fall through
+                } else {
+                    // Determine if this shorthand has a /-before-size longhand
+                    bool has_slash_size = (shorthand == "mask" || shorthand == "background");
+                    // Collect present values with their longhand indices
+                    struct LhValue { size_t longhand_idx; std::string_view value; };
+                    std::vector<LhValue> present;
+                    for (size_t li = 0; li < longhands.size(); li++) {
+                        auto it = prop_map.find(longhands[li]);
+                        if (it != prop_map.end()) {
+                            present.push_back({li, decls[it->second].value});
                         }
+                    }
 
-                        sh_value = minify_css_value(sh_value);
-
-                        CSSRule::Declaration sh_decl;
-                        sh_decl.property = doc.string_pool().intern(shorthand);
-                        sh_decl.value = doc.string_pool().intern(sh_value);
-                        decls.push_back(sh_decl);
-
-                        // Remove merged longhands (reverse order for stable indices)
-                        for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
-                            auto pit = prop_map.find(*it);
-                            if (pit != prop_map.end() && pit->second < decls.size()) {
-                                decls.erase(decls.begin() + pit->second);
-                                prop_map.clear();
-                                for (size_t j = 0; j < decls.size(); j++) {
-                                    prop_map[decls[j].property] = j;
-                                }
+                    // For SLASH_BEFORE_SIZE shorthands, skip the partial
+                    // merge if size is present without position — the
+                    // "/" separator requires preceding position.
+                    if (has_slash_size) {
+                        bool has_position = false;
+                        bool has_size = false;
+                        for (auto& lh : present) {
+                            if (longhands[lh.longhand_idx] == "mask-position" ||
+                                longhands[lh.longhand_idx] == "background-position") {
+                                has_position = true;
+                            }
+                            if (longhands[lh.longhand_idx] == "mask-size" ||
+                                longhands[lh.longhand_idx] == "background-size") {
+                                has_size = true;
                             }
                         }
+                        if (has_size && !has_position) {
+                            // Can't place /-separated size without position;
+                            // skip the partial merge.
+                            present.clear();
+                        }
+                    }
 
-                        changed = true;
+                    // Need at least 2 longhands for the merge to be worthwhile
+                    if (present.size() >= 2) {
+                        // Cascade-safe check
+                        if (!partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                            // skip: merge would override later declarations
+                        } else {
+                            std::string sh_value;
+                            for (size_t pi = 0; pi < present.size(); pi++) {
+                                if (pi > 0) {
+                                    // Prepend "/ " before size longhands in
+                                    // SLASH_BEFORE_SIZE shorthands
+                                    bool before_slash = has_slash_size &&
+                                        (longhands[present[pi].longhand_idx] == "mask-size" ||
+                                         longhands[present[pi].longhand_idx] == "background-size");
+                                    if (before_slash) {
+                                        sh_value += "/ ";
+                                    } else {
+                                        sh_value += ' ';
+                                    }
+                                }
+                                sh_value += std::string(present[pi].value);
+                            }
+
+                            sh_value = minify_css_value(sh_value);
+
+                            CSSRule::Declaration sh_decl;
+                            sh_decl.property = doc.string_pool().intern(shorthand);
+                            sh_decl.value = doc.string_pool().intern(sh_value);
+                            decls.push_back(sh_decl);
+
+                            // Remove merged longhands (reverse order for stable indices)
+                            for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                                auto pit = prop_map.find(*it);
+                                if (pit != prop_map.end() && pit->second < decls.size()) {
+                                    decls.erase(decls.begin() + pit->second);
+                                    prop_map.clear();
+                                    for (size_t j = 0; j < decls.size(); j++) {
+                                        prop_map[decls[j].property] = j;
+                                    }
+                                }
+                            }
+
+                            changed = true;
+                        }
                     }
                 }
             }
