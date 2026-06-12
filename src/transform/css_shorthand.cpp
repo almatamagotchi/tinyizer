@@ -56,6 +56,9 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"grid-area",    {"grid-row-start", "grid-column-start", "grid-row-end", "grid-column-end"}},
     {"grid-row",     {"grid-row-start", "grid-row-end"}},
     {"grid-column",  {"grid-column-start", "grid-column-end"}},
+    {"font-variant", {"font-variant-caps", "font-variant-numeric", "font-variant-alternates",
+                       "font-variant-ligatures", "font-variant-east-asian", "font-variant-position",
+                       "font-variant-emoji"}},
 };
 
 // CSS value minification helpers
@@ -789,6 +792,13 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"grid-column-start", "grid-area"},
         {"grid-row-end", "grid-area"},
         {"grid-column-end", "grid-area"},
+        {"font-variant-caps", "font-variant"},
+        {"font-variant-numeric", "font-variant"},
+        {"font-variant-alternates", "font-variant"},
+        {"font-variant-ligatures", "font-variant"},
+        {"font-variant-east-asian", "font-variant"},
+        {"font-variant-position", "font-variant"},
+        {"font-variant-emoji", "font-variant"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
@@ -1063,6 +1073,54 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                                 prop_map.clear();
                                 for (size_t i = 0; i < decls.size(); i++) {
                                     prop_map[decls[i].property] = i;
+                                }
+                            }
+                        }
+
+                        changed = true;
+                    }
+                }
+            }
+            // Generic partial merge: for shorthands with >4 longhands
+            // (e.g., font-variant 7, mask 8, transition 4+), merge when
+            // ≥2 longhands are present by joining their values with spaces.
+            else if (!has_all && longhands.size() > 4) {
+                // Count how many longhands are present and collect values
+                std::vector<std::string_view> present_values;
+                for (size_t li = 0; li < longhands.size(); li++) {
+                    auto it = prop_map.find(longhands[li]);
+                    if (it != prop_map.end()) {
+                        present_values.push_back(decls[it->second].value);
+                    }
+                }
+
+                // Need at least 2 longhands for the merge to be worthwhile
+                if (present_values.size() >= 2) {
+                    // Cascade-safe check
+                    if (!partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                        // skip: merge would override later declarations
+                    } else {
+                        std::string sh_value;
+                        for (size_t vi = 0; vi < present_values.size(); vi++) {
+                            if (vi > 0) sh_value += ' ';
+                            sh_value += std::string(present_values[vi]);
+                        }
+
+                        sh_value = minify_css_value(sh_value);
+
+                        CSSRule::Declaration sh_decl;
+                        sh_decl.property = doc.string_pool().intern(shorthand);
+                        sh_decl.value = doc.string_pool().intern(sh_value);
+                        decls.push_back(sh_decl);
+
+                        // Remove merged longhands (reverse order for stable indices)
+                        for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                            auto pit = prop_map.find(*it);
+                            if (pit != prop_map.end() && pit->second < decls.size()) {
+                                decls.erase(decls.begin() + pit->second);
+                                prop_map.clear();
+                                for (size_t j = 0; j < decls.size(); j++) {
+                                    prop_map[decls[j].property] = j;
                                 }
                             }
                         }
