@@ -51,6 +51,10 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"scroll-padding", {"scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"}},
     {"mask",         {"mask-image", "mask-position", "mask-size", "mask-repeat",
                       "mask-origin", "mask-clip", "mask-mode", "mask-composite"}},
+    {"overflow-block", {"overflow-block-start", "overflow-block-end"}},
+    {"overflow-inline", {"overflow-inline-start", "overflow-inline-end"}},
+    {"grid-row",     {"grid-row-start", "grid-row-end"}},
+    {"grid-column",  {"grid-column-start", "grid-column-end"}},
 };
 
 // CSS value minification helpers
@@ -772,6 +776,14 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"mask-clip", "mask"},
         {"mask-mode", "mask"},
         {"mask-composite", "mask"},
+        {"overflow-block-start", "overflow-block"},
+        {"overflow-block-end", "overflow-block"},
+        {"overflow-inline-start", "overflow-inline"},
+        {"overflow-inline-end", "overflow-inline"},
+        {"grid-row-start", "grid-row"},
+        {"grid-row-end", "grid-row"},
+        {"grid-column-start", "grid-column"},
+        {"grid-column-end", "grid-column"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
@@ -834,6 +846,10 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 static const std::unordered_set<std::string_view> SLASH_BEFORE_SIZE = {
                     "background", "mask"
                 };
+                // shorthands where ALL longhand values are separated by "/" instead of space
+                static const std::unordered_set<std::string_view> SLASH_BETWEEN_ALL = {
+                    "grid-row", "grid-column"
+                };
                 // mask: deduplicate origin/clip when equal
                 bool dedup_origin_clip = (shorthand == "mask");
                 std::string_view origin_val, clip_val;
@@ -865,17 +881,19 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                         continue;
                     }
 
-                    // Insert "/" before size properties
-                    if (SLASH_BEFORE_SIZE.count(shorthand) &&
-                        (longhands[li] == "background-size" || longhands[li] == "mask-size")) {
-                        if (!sh_value.empty()) sh_value += ' ';
-                        sh_value += '/';
-                        sh_value += ' ';
-                        sh_value += decls[it->second].value;
-                    } else {
-                        if (!sh_value.empty()) sh_value += ' ';
-                        sh_value += decls[it->second].value;
+                    // Separator character
+                    bool slash_all = SLASH_BETWEEN_ALL.count(shorthand);
+                    bool slash_before = SLASH_BEFORE_SIZE.count(shorthand) &&
+                        (longhands[li] == "background-size" || longhands[li] == "mask-size");
+
+                    if (!sh_value.empty()) {
+                        if (slash_all || slash_before) {
+                            sh_value += " / ";
+                        } else {
+                            sh_value += ' ';
+                        }
                     }
+                    sh_value += decls[it->second].value;
                 }
 
                 // Try to simplify: if all values are the same, use fewer
