@@ -63,6 +63,15 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
                        "font-variant-emoji"}},
 };
 
+// Shorthands where comma-separated longhand values cannot be safely
+// merged — each comma group in the longhand corresponds to a separate
+// animation/transition stack, and we can't match them across properties
+// without a proper comma-aware merge. Skip the merge entirely if any
+// longhand value contains a comma.
+static const std::unordered_set<std::string_view> COMMA_SKIP_SHORTHANDS = {
+    "animation", "transition"
+};
+
 // Longhands that always need a "/" separator prefix in their shorthand
 // (e.g., mask-border: "/" before mask-border-width and mask-border-outset)
 static const std::unordered_set<std::string_view> SLASH_AT_LONGHANDS = {
@@ -871,10 +880,26 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             if (shorthand == "font") continue;
             // Check if we have all longhand properties
             bool has_all = true;
-            for (auto lh : longhands) {
-                if (prop_map.find(lh) == prop_map.end()) {
-                    has_all = false;
-                    break;
+            bool has_comma = false;
+            if (COMMA_SKIP_SHORTHANDS.count(shorthand)) {
+                for (auto lh : longhands) {
+                    auto it = prop_map.find(lh);
+                    if (it == prop_map.end()) {
+                        has_all = false;
+                        break;
+                    }
+                    if (decls[it->second].value.find(',') != std::string::npos) {
+                        has_comma = true;
+                    }
+                }
+                if (has_all && has_comma) has_all = false;
+            }
+            if (has_all) {
+                for (auto lh : longhands) {
+                    if (prop_map.find(lh) == prop_map.end()) {
+                        has_all = false;
+                        break;
+                    }
                 }
             }
 
@@ -954,7 +979,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     } else if (v1 == v3) {
                         sh_value = std::string(v0) + " " + std::string(v1) + " " + std::string(v2);
                     }
-                } else if (longhands.size() == 2 && !SLASH_BETWEEN_ALL.count(shorthand)) {
+                } else if (longhands.size() == 2 && !SLASH_BETWEEN_ALL.count(shorthand) && !COMMA_SKIP_SHORTHANDS.count(shorthand)) {
                     std::string_view v0 = decls[prop_map[longhands[0]]].value;
                     std::string_view v1 = decls[prop_map[longhands[1]]].value;
                     if (v0 == v1) {
@@ -990,9 +1015,9 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             // border-width), merge when ≥2 longhands are present, using "0" for missing
             // sides (initial values are 0). Skip border-style and border-color where
             // initial is not 0.
-            else if (!has_all && longhands.size() == 4) {
+            else if (!has_all && longhands.size() == 4 && !COMMA_SKIP_SHORTHANDS.count(shorthand)) {
                 static const std::unordered_set<std::string_view> PARTIAL_4_UNSAFE = {
-                    "border-style", "border-color", "grid-area"
+                    "border-style", "border-color", "grid-area", "transition"
                 };
                 if (PARTIAL_4_UNSAFE.find(shorthand) == PARTIAL_4_UNSAFE.end()) {
                     // Count how many longhands are present and build the 4-value string
@@ -1045,7 +1070,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             // Partial merge: for 3-component shorthands (border/outline/border-*),
             // merge when border-style (required) plus at least width or color are present.
             // Missing components keep their initial values, so the shorthand is equivalent.
-            else if (!has_all && longhands.size() == 3) {
+            else if (!has_all && longhands.size() == 3 && !COMMA_SKIP_SHORTHANDS.count(shorthand)) {
                 auto w_it = prop_map.find(longhands[0]); // width
                 auto s_it = prop_map.find(longhands[1]); // style (required)
                 auto c_it = prop_map.find(longhands[2]); // color
@@ -1106,6 +1131,21 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 if (shorthand == "grid-row" || shorthand == "grid-column" || shorthand == "grid-area") {
                     // can't partially merge; fall through
                 } else {
+                    // Skip comma-separated longhands for animation/transition —
+                    // can't safely match comma groups across properties yet.
+                    bool skip_comma = false;
+                    if (COMMA_SKIP_SHORTHANDS.count(shorthand)) {
+                        for (auto lh : longhands) {
+                            auto it = prop_map.find(lh);
+                            if (it != prop_map.end() && decls[it->second].value.find(',') != std::string::npos) {
+                                skip_comma = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (skip_comma) {
+                        // fall through — skip merge
+                    } else {
                     // Determine if this shorthand has a /-before-size longhand
                     bool has_slash_size = (shorthand == "mask" || shorthand == "background");
                     bool has_slash_at = (shorthand == "mask-border");
@@ -1209,6 +1249,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                             changed = true;
                         }
                     }
+                    }
                 }
             }
             // Generic 2-value partial merge: when exactly 1 of 2 longhands is
@@ -1216,7 +1257,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             // to the same value — aggressive but valid for extreme minification).
             // This handles overflow, gap, flex-flow, columns, place-*, and any
             // future 2-value shorthands generically without per-property entries.
-            else if (!has_all && longhands.size() == 2) {
+            else if (!has_all && longhands.size() == 2 && !COMMA_SKIP_SHORTHANDS.count(shorthand)) {
                 // Count present longhands, find the one that IS present
                 size_t present_count = 0;
                 std::string_view present_value;
