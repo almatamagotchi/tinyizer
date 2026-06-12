@@ -815,6 +815,52 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
 
                 changed = true;
             }
+            // Partial merge: for 3-component shorthands (border/outline/border-*),
+            // merge when border-style (required) plus at least width or color are present.
+            // Missing components keep their initial values, so the shorthand is equivalent.
+            else if (!has_all && longhands.size() == 3) {
+                auto w_it = prop_map.find(longhands[0]); // width
+                auto s_it = prop_map.find(longhands[1]); // style (required)
+                auto c_it = prop_map.find(longhands[2]); // color
+
+                bool has_style = (s_it != prop_map.end());
+                bool has_width = (w_it != prop_map.end());
+                bool has_color = (c_it != prop_map.end());
+
+                if (has_style && (has_width || has_color)) {
+                    std::string sh_value;
+                    if (has_width) {
+                        sh_value = std::string(decls[w_it->second].value);
+                    }
+                    if (!sh_value.empty()) sh_value += ' ';
+                    sh_value += std::string(decls[s_it->second].value);
+                    if (has_color) {
+                        sh_value += ' ';
+                        sh_value += std::string(decls[c_it->second].value);
+                    }
+
+                    sh_value = minify_css_value(sh_value);
+
+                    CSSRule::Declaration sh_decl;
+                    sh_decl.property = doc.string_pool().intern(shorthand);
+                    sh_decl.value = doc.string_pool().intern(sh_value);
+                    decls.push_back(sh_decl);
+
+                    // Remove merged longhands
+                    for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                        auto pit = prop_map.find(*it);
+                        if (pit != prop_map.end() && pit->second < decls.size()) {
+                            decls.erase(decls.begin() + pit->second);
+                            prop_map.clear();
+                            for (size_t i = 0; i < decls.size(); i++) {
+                                prop_map[decls[i].property] = i;
+                            }
+                        }
+                    }
+
+                    changed = true;
+                }
+            }
         }
 
         // --- Special: font shorthand (minimum: font-size + font-family) ---
