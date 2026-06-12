@@ -78,6 +78,80 @@ static const std::unordered_set<std::string_view> SLASH_AT_LONGHANDS = {
     "mask-border-width", "mask-border-outset"
 };
 
+// Initial values for comma-group longhands (animation, transition)
+static const std::unordered_map<std::string_view, std::string> COMMA_GROUP_INITIALS = {
+    {"animation-name", "none"}, {"animation-duration", "0s"},
+    {"animation-timing-function", "ease"}, {"animation-delay", "0s"},
+    {"animation-iteration-count", "1"}, {"animation-direction", "normal"},
+    {"animation-fill-mode", "none"}, {"animation-play-state", "running"},
+    {"transition-property", "all"}, {"transition-duration", "0s"},
+    {"transition-timing-function", "ease"}, {"transition-delay", "0s"},
+};
+
+/*
+ * Build a comma-group-aware shorthand value for animation/transition.
+ *
+ * Each longhand may have comma-separated values (e.g., animation-name: a, b).
+ * Group values positionally across longhands, expanding implicit single values
+ * to match the maximum group count. Missing longhands get initial values.
+ */
+static std::string build_comma_group_shorthand(
+    const std::vector<std::string_view>& longhands,
+    const std::unordered_map<std::string_view, std::string_view>& values)
+{
+    std::vector<std::vector<std::string>> all_parts;
+    size_t max_groups = 0;
+
+    for (auto lh : longhands) {
+        auto it = values.find(lh);
+        std::vector<std::string> parts;
+        if (it != values.end()) {
+            std::string_view v = it->second;
+            size_t pos = 0;
+            while (pos <= v.size()) {
+                size_t comma = v.find(',', pos);
+                if (comma == std::string_view::npos) comma = v.size();
+                std::string_view part = v.substr(pos, comma - pos);
+                while (!part.empty() && (part.front() == ' ' || part.front() == '\t'))
+                    part.remove_prefix(1);
+                while (!part.empty() && (part.back() == ' ' || part.back() == '\t'))
+                    part.remove_suffix(1);
+                parts.push_back(std::string(part));
+                pos = comma + 1;
+            }
+        } else {
+            auto init_it = COMMA_GROUP_INITIALS.find(lh);
+            std::string init = (init_it != COMMA_GROUP_INITIALS.end())
+                                   ? init_it->second : "0";
+            parts.push_back(init);
+        }
+        if (parts.size() > max_groups) max_groups = parts.size();
+        all_parts.push_back(std::move(parts));
+    }
+
+    // Expand single-group longhands to match max_groups
+    for (auto& parts : all_parts) {
+        if (parts.size() == 1 && max_groups > 1)
+            parts.resize(max_groups, parts[0]);
+    }
+
+    // Assemble: per group, join longhand values with space
+    std::string result;
+    for (size_t gi = 0; gi < max_groups; gi++) {
+        if (gi > 0) result += ", ";
+        bool first = true;
+        for (size_t li = 0; li < all_parts.size(); li++) {
+            if (gi < all_parts[li].size() && !all_parts[li][gi].empty()) {
+                if (!first) result += ' ';
+                result += all_parts[li][gi];
+                first = false;
+            }
+        }
+    }
+
+    return result;
+}
+
 // CSS value minification helpers
 // Try to constant-fold a simple calc expression: "10px + 20px" → "30px"
 // Returns empty string if folding isn't possible (mixed units, complex expression, etc.)
@@ -878,33 +952,19 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             const auto& longhands = *longhands_ptr;
             // font is handled separately — requires only font-size + font-family
             if (shorthand == "font") continue;
-            // Check if we have all longhand properties
+            // Check if we have all longhand properties.
+            // For comma-group shorthands (animation, transition), keep has_all
+            // even when commas appear — comma-aware merging handles it below.
             bool has_all = true;
-            bool has_comma = false;
-            if (COMMA_SKIP_SHORTHANDS.count(shorthand)) {
-                for (auto lh : longhands) {
-                    auto it = prop_map.find(lh);
-                    if (it == prop_map.end()) {
-                        has_all = false;
-                        break;
-                    }
-                    if (decls[it->second].value.find(',') != std::string::npos) {
-                        has_comma = true;
-                    }
-                }
-                if (has_all && has_comma) has_all = false;
-            }
-            if (has_all) {
-                for (auto lh : longhands) {
-                    if (prop_map.find(lh) == prop_map.end()) {
-                        has_all = false;
-                        break;
-                    }
+            for (auto lh : longhands) {
+                if (prop_map.find(lh) == prop_map.end()) {
+                    has_all = false;
+                    break;
                 }
             }
 
             if (has_all && longhands.size() >= 2) {
-                // Build the shorthand value
+                // Build the shorthand value.
                 // shorthands where size must be preceded by "/"
                 static const std::unordered_set<std::string_view> SLASH_BEFORE_SIZE = {
                     "background", "mask"
@@ -917,7 +977,18 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 bool dedup_origin_clip = (shorthand == "mask");
                 std::string_view origin_val, clip_val;
 
+                // Comma-group shorthands (animation, transition) use
+                // comma-aware matching; all others join with space or "/".
                 std::string sh_value;
+                if (COMMA_SKIP_SHORTHANDS.count(shorthand)) {
+                    std::unordered_map<std::string_view, std::string_view> vals;
+                    for (auto lh : longhands) {
+                        auto it = prop_map.find(lh);
+                        if (it != prop_map.end())
+                            vals[lh] = decls[it->second].value;
+                    }
+                    sh_value = build_comma_group_shorthand(longhands, vals);
+                } else {
                 for (size_t li = 0; li < longhands.size(); li++) {
                     auto it = prop_map.find(longhands[li]);
                     if (it == prop_map.end()) continue;
@@ -959,6 +1030,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     }
                     sh_value += decls[it->second].value;
                 }
+                } // end else (non-comma-group)
 
                 // Try to simplify: if all values are the same, use fewer
                 // For 4-value: top right bottom left
@@ -1010,6 +1082,38 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 }
 
                 changed = true;
+            }
+            // Partial merge: comma-group 4-value (transition): merge with
+            // comma-aware matching.
+            else if (!has_all && longhands.size() == 4 && COMMA_SKIP_SHORTHANDS.count(shorthand)) {
+                if (shorthand == "transition" && partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                    std::unordered_map<std::string_view, std::string_view> vals;
+                    for (auto lh : longhands) {
+                        auto it = prop_map.find(lh);
+                        if (it != prop_map.end())
+                            vals[lh] = decls[it->second].value;
+                    }
+                    if (!vals.empty()) {
+                        std::string sh_value = build_comma_group_shorthand(longhands, vals);
+                        if (!sh_value.empty()) {
+                            sh_value = minify_css_value(sh_value);
+                            CSSRule::Declaration sh_decl;
+                            sh_decl.property = doc.string_pool().intern(shorthand);
+                            sh_decl.value = doc.string_pool().intern(sh_value);
+                            decls.push_back(sh_decl);
+                            for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                                auto pit = prop_map.find(*it);
+                                if (pit != prop_map.end() && pit->second < decls.size()) {
+                                    decls.erase(decls.begin() + pit->second);
+                                    prop_map.clear();
+                                    for (size_t j = 0; j < decls.size(); j++)
+                                        prop_map[decls[j].property] = j;
+                                }
+                            }
+                            changed = true;
+                        }
+                    }
+                }
             }
             // Partial merge: for 4-value families (margin, padding, inset, border-radius,
             // border-width), merge when ≥2 longhands are present, using "0" for missing
@@ -1131,20 +1235,37 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 if (shorthand == "grid-row" || shorthand == "grid-column" || shorthand == "grid-area") {
                     // can't partially merge; fall through
                 } else {
-                    // Skip comma-separated longhands for animation/transition —
-                    // can't safely match comma groups across properties yet.
-                    bool skip_comma = false;
+                    // Comma-group shorthands (animation, transition): use
+                    // comma-group-aware partial merge.
                     if (COMMA_SKIP_SHORTHANDS.count(shorthand)) {
-                        for (auto lh : longhands) {
-                            auto it = prop_map.find(lh);
-                            if (it != prop_map.end() && decls[it->second].value.find(',') != std::string::npos) {
-                                skip_comma = true;
-                                break;
+                        if (partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                            std::unordered_map<std::string_view, std::string_view> vals;
+                            for (auto lh : longhands) {
+                                auto it = prop_map.find(lh);
+                                if (it != prop_map.end())
+                                    vals[lh] = decls[it->second].value;
+                            }
+                            if (!vals.empty()) {
+                                std::string sh_value = build_comma_group_shorthand(longhands, vals);
+                                if (!sh_value.empty()) {
+                                    sh_value = minify_css_value(sh_value);
+                                    CSSRule::Declaration sh_decl;
+                                    sh_decl.property = doc.string_pool().intern(shorthand);
+                                    sh_decl.value = doc.string_pool().intern(sh_value);
+                                    decls.push_back(sh_decl);
+                                    for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                                        auto pit = prop_map.find(*it);
+                                        if (pit != prop_map.end() && pit->second < decls.size()) {
+                                            decls.erase(decls.begin() + pit->second);
+                                            prop_map.clear();
+                                            for (size_t j = 0; j < decls.size(); j++)
+                                                prop_map[decls[j].property] = j;
+                                        }
+                                    }
+                                    changed = true;
+                                }
                             }
                         }
-                    }
-                    if (skip_comma) {
-                        // fall through — skip merge
                     } else {
                     // Determine if this shorthand has a /-before-size longhand
                     bool has_slash_size = (shorthand == "mask" || shorthand == "background");
