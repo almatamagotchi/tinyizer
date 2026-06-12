@@ -51,6 +51,8 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"scroll-padding", {"scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"}},
     {"mask",         {"mask-image", "mask-position", "mask-size", "mask-repeat",
                       "mask-origin", "mask-clip", "mask-mode", "mask-composite"}},
+    {"mask-border", {"mask-border-source", "mask-border-slice", "mask-border-width",
+                      "mask-border-outset", "mask-border-repeat", "mask-border-mode"}},
     {"overflow-block", {"overflow-block-start", "overflow-block-end"}},
     {"overflow-inline", {"overflow-inline-start", "overflow-inline-end"}},
     {"grid-area",    {"grid-row-start", "grid-column-start", "grid-row-end", "grid-column-end"}},
@@ -59,6 +61,12 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"font-variant", {"font-variant-caps", "font-variant-numeric", "font-variant-alternates",
                        "font-variant-ligatures", "font-variant-east-asian", "font-variant-position",
                        "font-variant-emoji"}},
+};
+
+// Longhands that always need a "/" separator prefix in their shorthand
+// (e.g., mask-border: "/" before mask-border-width and mask-border-outset)
+static const std::unordered_set<std::string_view> SLASH_AT_LONGHANDS = {
+    "mask-border-width", "mask-border-outset"
 };
 
 // CSS value minification helpers
@@ -780,6 +788,12 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"mask-clip", "mask"},
         {"mask-mode", "mask"},
         {"mask-composite", "mask"},
+        {"mask-border-source", "mask-border"},
+        {"mask-border-slice", "mask-border"},
+        {"mask-border-width", "mask-border"},
+        {"mask-border-outset", "mask-border"},
+        {"mask-border-repeat", "mask-border"},
+        {"mask-border-mode", "mask-border"},
         {"overflow-block-start", "overflow-block"},
         {"overflow-block-end", "overflow-block"},
         {"overflow-inline-start", "overflow-inline"},
@@ -909,9 +923,10 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     bool slash_all = SLASH_BETWEEN_ALL.count(shorthand);
                     bool slash_before = SLASH_BEFORE_SIZE.count(shorthand) &&
                         (longhands[li] == "background-size" || longhands[li] == "mask-size");
+                    bool slash_at = SLASH_AT_LONGHANDS.count(longhands[li]);
 
                     if (!sh_value.empty()) {
-                        if (slash_all || slash_before) {
+                        if (slash_all || slash_before || slash_at) {
                             sh_value += " / ";
                         } else {
                             sh_value += ' ';
@@ -1093,6 +1108,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 } else {
                     // Determine if this shorthand has a /-before-size longhand
                     bool has_slash_size = (shorthand == "mask" || shorthand == "background");
+                    bool has_slash_at = (shorthand == "mask-border");
                     // Collect present values with their longhand indices
                     struct LhValue { size_t longhand_idx; std::string_view value; };
                     std::vector<LhValue> present;
@@ -1126,6 +1142,26 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                         }
                     }
 
+                    // For mask-border, skip if width/outset present without
+                    // source or slice — the "/" separators need an anchor.
+                    if (has_slash_at) {
+                        bool has_anchor = false;
+                        bool has_slash_part = false;
+                        for (auto& lh : present) {
+                            if (longhands[lh.longhand_idx] == "mask-border-source" ||
+                                longhands[lh.longhand_idx] == "mask-border-slice") {
+                                has_anchor = true;
+                            }
+                            if (longhands[lh.longhand_idx] == "mask-border-width" ||
+                                longhands[lh.longhand_idx] == "mask-border-outset") {
+                                has_slash_part = true;
+                            }
+                        }
+                        if (has_slash_part && !has_anchor) {
+                            present.clear();
+                        }
+                    }
+
                     // Need at least 2 longhands for the merge to be worthwhile
                     if (present.size() >= 2) {
                         // Cascade-safe check
@@ -1140,7 +1176,9 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                                     bool before_slash = has_slash_size &&
                                         (longhands[present[pi].longhand_idx] == "mask-size" ||
                                          longhands[present[pi].longhand_idx] == "background-size");
-                                    if (before_slash) {
+                                    // Also for mask-border: "/" before width and outset
+                                    bool slash_at_lh = has_slash_at && SLASH_AT_LONGHANDS.count(longhands[present[pi].longhand_idx]);
+                                    if (before_slash || slash_at_lh) {
                                         sh_value += "/ ";
                                     } else {
                                         sh_value += ' ';
