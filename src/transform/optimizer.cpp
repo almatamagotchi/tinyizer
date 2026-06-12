@@ -405,6 +405,218 @@ static size_t strip_return_parens(std::string& js) {
     return replacements;
 }
 
+// ---- Strip else-after-jump ----
+// When an if-block ends with a return/throw/break/continue, the following
+// else is redundant because execution never reaches it when the if-taken path
+// jumps.  Replace `}else` with `}` (the else-body becomes unconditional).
+// e.g. if(x){return 1;}else{...} → if(x){return 1;}...  saves 4-5 bytes.
+static size_t strip_else_after_jump(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_id = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    static const std::vector<std::string> jumps = {"return","throw","break","continue"};
+
+    size_t replacements = 0;
+    size_t pos = 0;
+
+    while ((pos = js.find("else", pos)) != std::string::npos) {
+        if (inside_string(pos)) { pos += 4; continue; }
+
+        // Walk back past whitespace to find the terminator before `else`
+        size_t term = pos;
+        while (term > 0 && (js[term-1] == ' ' || js[term-1] == '\t' ||
+                              js[term-1] == '\n' || js[term-1] == '\r'))
+            term--;
+        if (term == 0) { pos += 4; continue; }
+        char term_char = js[term-1];
+        if (term_char != '}' && term_char != ';') { pos += 4; continue; }
+
+        // Case 1: braced if  ->  } else  -> walk back from }
+        // Case 2: unbraced if  ->  ; else  -> check the statement before ;
+        if (term_char == '}') {
+            size_t brace = term - 1;
+            if (inside_string(brace)) { pos += 4; continue; }
+
+            // First, check that the last non-whitespace before `}` is `;`
+            // (or the expression directly).  This ensures we don't match
+            // a return that sits earlier in the block.
+            size_t chk = brace;
+            while (chk > 0 && (js[chk-1] == ' ' || js[chk-1] == '\t' || js[chk-1] == '\n' || js[chk-1] == '\r'))
+                chk--;
+            // If the last meaningful char is `}`, skip (non-jump block).
+            if (chk > 0 && js[chk-1] == '}') { pos += 4; continue; }
+            // Allow `;` (normal) or direct expression (e.g. `return x}`).
+            // Otherwise we'll scan for keywords below.
+
+            int depth = 1;
+            bool found_jump = false;
+            size_t i = brace;
+            while (i > 0) {
+                i--;
+                char c = js[i];
+                if (inside_string(i)) continue;
+                if (c == '}') { depth++; continue; }
+                if (c == '{') {
+                    depth--;
+                    if (depth == 0) break;
+                    continue;
+                }
+                if (depth != 1) continue; // only examine our block level
+
+                if (!is_id(c))
+                    continue;
+                size_t id_end = i + 1;
+                while (i > 0 && is_id(js[i-1])) i--;
+                std::string id = js.substr(i, id_end - i);
+                if (std::find(jumps.begin(), jumps.end(), id) != jumps.end()) {
+                    found_jump = true;
+                    break;
+                }
+            }
+
+            if (!found_jump) { pos += 4; continue; }
+
+            size_t erase_start = brace + 1; // after }
+            size_t erase_end = pos + 4;     // past `else`
+            while (erase_end < js.size() && (js[erase_end] == ' ' || js[erase_end] == '\t' ||
+                                              js[erase_end] == '\n' || js[erase_end] == '\r'))
+                erase_end++;
+            js.erase(erase_start, erase_end - erase_start);
+            replacements++;
+        } else { // term_char == ';'
+            size_t semi = term - 1;
+            if (inside_string(semi)) { pos += 4; continue; }
+
+            // Walk backwards from the semicolon, past the jump expression,
+            // to find the keyword (return/throw/break/continue).
+            // Strategy: scan backward in two phases.
+            // Phase 1: skip whitespace after the expression.
+            // Phase 2: walk the expression (matching delimiters) until we
+            //   hit something that isn't part of it — that should be the keyword.
+
+            size_t i = semi;
+            // Phase 1
+            while (i > 0 && (js[i-1] == ' ' || js[i-1] == '\t' || js[i-1] == '\n' || js[i-1] == '\r'))
+                i--;
+            if (i == 0) { pos += 4; continue; }
+
+            // Phase 2: walk backwards over the expression.
+            // We scan for the start of the preceding statement.  Because this
+            // is minified code, the statement started right after one of:
+            // `{`  `}`  `;`  `:`  `(` (the if-condition paren)
+            // and we stop at that boundary.
+            i--;
+            int p_depth = 0, b_depth = 0, c_depth = 0;
+            while (i > 0 && !inside_string(i)) {
+                char c = js[i];
+                if (c == ')' || c == ']' || c == '}') {
+                    if (c == ')') p_depth++;
+                    else if (c == ']') b_depth++;
+                    else c_depth++;
+                    i--;
+                    continue;
+                }
+                if (c == '(') {
+                    if (p_depth > 0) {
+                        p_depth--;
+                        // Check if this '(' opens a control structure (if, while,
+                        // for, switch, catch, with) rather than a nested call.
+                        // If so, stop — the enclosed )...(... pair is the boundary.
+                        size_t check = i;
+                        while (check > 0 && (js[check-1] == ' ' || js[check-1] == '\t' ||
+                                              js[check-1] == '\n' || js[check-1] == '\r'))
+                            check--;
+                        if (check > 1 && is_id(js[check-1])) {
+                            size_t ks = check - 1;
+                            while (ks > 0 && is_id(js[ks-1])) ks--;
+                            std::string kw = js.substr(ks, check - ks);
+                            if (kw == "if" || kw == "while" || kw == "for" ||
+                                kw == "switch" || kw == "catch" || kw == "with")
+                                break; // boundary of enclosing control construct
+                        }
+                        i--;
+                        continue;
+                    }
+                    break; // unmatched '(' → start of if-condition or call boundary
+                }
+                if (c == '[') {
+                    if (b_depth > 0) { b_depth--; i--; continue; }
+                    break;
+                }
+                if (c == '{') {
+                    if (c_depth > 0) { c_depth--; i--; continue; }
+                    break;
+                }
+                // At depth 0: check for statement boundaries
+                if (p_depth == 0 && b_depth == 0 && c_depth == 0) {
+                    if (c == ';' || c == ':' || c == ',') break;
+                    // If it's not a valid expression character at the top level,
+                    // and it's not part of an identifier that might be the keyword,
+                    // stop.
+                    if (!is_id(c) && c != '.' && c != '!' && c != '~' &&
+                        c != '-' && c != '+' && c != ' ' && c != '\t' &&
+                        c != '\n' && c != '\r' && c != '\'' && c != '"' && c != '`') {
+                        break;
+                    }
+                }
+                i--;
+            }
+
+            // Now i points to the char just before our statement's keyword,
+            // or i == 0, or i is sitting on the statement-start delimiter.
+            // Find the keyword.
+            size_t kw_start = i + 1;
+            // If we broke on `(` that opens the enclosing if/while/for,
+            // skip forward past the matching `)` to find the statement's keyword.
+            // Note: we broke inside the while loop, so i points AT the '('.
+            if (kw_start <= semi && i < semi && js[i] == '(') {
+                kw_start = i;  // start from the '('
+                int skip_depth = 1;
+                while (kw_start < semi) {
+                    kw_start++;
+                    if (js[kw_start] == '(') skip_depth++;
+                    else if (js[kw_start] == ')') {
+                        skip_depth--;
+                        if (skip_depth == 0) { kw_start++; break; }
+                    }
+                }
+            }
+            while (kw_start < semi && (js[kw_start] == ' ' || js[kw_start] == '\t' ||
+                                        js[kw_start] == '\n' || js[kw_start] == '\r'))
+                kw_start++;
+            size_t kw_end = kw_start;
+            while (kw_end < semi && is_id(js[kw_end]))
+                kw_end++;
+            std::string kw = js.substr(kw_start, kw_end - kw_start);
+            if (std::find(jumps.begin(), jumps.end(), kw) != jumps.end()) {
+                size_t erase_start = semi + 1; // after ;
+                size_t erase_end = pos + 4;     // past `else`
+                while (erase_end < js.size() && (js[erase_end] == ' ' || js[erase_end] == '\t' ||
+                                                  js[erase_end] == '\n' || js[erase_end] == '\r'))
+                    erase_end++;
+                js.erase(erase_start, erase_end - erase_start);
+                replacements++;
+            }
+            pos += 4;
+        }
+    }
+
+    return replacements;
+}
+
 // ---- Strip orphan top-level assignments ----
 // After var stripping, a dead `var x = 1;` becomes `x = 1;` — an assignment
 // whose target is never read elsewhere. Scan top-level (depth 0) for
@@ -1758,6 +1970,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         replace_infinity_with_division(opt_js);
         // Strip redundant parens after `return` (2 bytes saved per occurrence)
         strip_return_parens(opt_js);
+        // Strip redundant else after return/throw/break/continue (4-5 bytes/occ)
+        strip_else_after_jump(opt_js);
         // Strip functions that became empty after console call removal
         strip_empty_functions(opt_js);
         // Strip functions that became unreferenced after console stripping
