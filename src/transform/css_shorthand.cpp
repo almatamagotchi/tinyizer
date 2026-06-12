@@ -47,6 +47,8 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
     {"place-items",   {"align-items", "justify-items"}},
     {"place-self",    {"align-self", "justify-self"}},
     {"text-emphasis", {"text-emphasis-style", "text-emphasis-color"}},
+    {"scroll-margin", {"scroll-margin-top", "scroll-margin-right", "scroll-margin-bottom", "scroll-margin-left"}},
+    {"scroll-padding", {"scroll-padding-top", "scroll-padding-right", "scroll-padding-bottom", "scroll-padding-left"}},
 };
 
 // CSS value minification helpers
@@ -752,6 +754,14 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"inset-inline-end", "inset-inline"},
         {"text-emphasis-style", "text-emphasis"},
         {"text-emphasis-color", "text-emphasis"},
+        {"scroll-margin-top", "scroll-margin"},
+        {"scroll-margin-right", "scroll-margin"},
+        {"scroll-margin-bottom", "scroll-margin"},
+        {"scroll-margin-left", "scroll-margin"},
+        {"scroll-padding-top", "scroll-padding"},
+        {"scroll-padding-right", "scroll-padding"},
+        {"scroll-padding-bottom", "scroll-padding"},
+        {"scroll-padding-left", "scroll-padding"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
