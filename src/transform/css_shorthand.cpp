@@ -53,6 +53,7 @@ static const std::unordered_map<std::string_view, std::vector<std::string_view>>
                       "mask-origin", "mask-clip", "mask-mode", "mask-composite"}},
     {"overflow-block", {"overflow-block-start", "overflow-block-end"}},
     {"overflow-inline", {"overflow-inline-start", "overflow-inline-end"}},
+    {"grid-area",    {"grid-row-start", "grid-column-start", "grid-row-end", "grid-column-end"}},
     {"grid-row",     {"grid-row-start", "grid-row-end"}},
     {"grid-column",  {"grid-column-start", "grid-column-end"}},
 };
@@ -784,6 +785,10 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"grid-row-end", "grid-row"},
         {"grid-column-start", "grid-column"},
         {"grid-column-end", "grid-column"},
+        {"grid-row-start", "grid-area"},
+        {"grid-column-start", "grid-area"},
+        {"grid-row-end", "grid-area"},
+        {"grid-column-end", "grid-area"},
     };
 
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
@@ -828,7 +833,16 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         }
 
         // Check each shorthand (multi-longhand merging)
-        for (const auto& [shorthand, longhands] : SHORTHAND_MAP) {
+        // Process larger shorthands first so grid-area (4 longhands) beats
+        // grid-row (2 longhands) when all longhands are present.
+        // SHORTHAND_MAP is unordered_map; build a sorted view by longhand count.
+        std::vector<std::pair<std::string_view, const std::vector<std::string_view>*>> sorted_sh;
+        for (const auto& p : SHORTHAND_MAP)
+            sorted_sh.emplace_back(p.first, &p.second);
+        std::stable_sort(sorted_sh.begin(), sorted_sh.end(),
+            [](const auto& a, const auto& b) { return a.second->size() > b.second->size(); });
+        for (const auto& [shorthand, longhands_ptr] : sorted_sh) {
+            const auto& longhands = *longhands_ptr;
             // font is handled separately — requires only font-size + font-family
             if (shorthand == "font") continue;
             // Check if we have all longhand properties
@@ -848,7 +862,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 };
                 // shorthands where ALL longhand values are separated by "/" instead of space
                 static const std::unordered_set<std::string_view> SLASH_BETWEEN_ALL = {
-                    "grid-row", "grid-column"
+                    "grid-row", "grid-column", "grid-area"
                 };
                 // mask: deduplicate origin/clip when equal
                 bool dedup_origin_clip = (shorthand == "mask");
@@ -900,7 +914,9 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 // For 4-value: top right bottom left
                 // If top == bottom && left == right, collapse to 2 values
                 // If all equal, collapse to 1 value
-                if (longhands.size() == 4) {
+                // Skip for /-separated shorthands where position has semantic meaning
+                // (e.g., grid-area: 1 / 1 / 1 / 1 ≠ grid-area: 1)
+                if (longhands.size() == 4 && !SLASH_BETWEEN_ALL.count(shorthand)) {
                     std::string_view v0 = decls[prop_map[longhands[0]]].value;
                     std::string_view v1 = decls[prop_map[longhands[1]]].value;
                     std::string_view v2 = decls[prop_map[longhands[2]]].value;
@@ -913,7 +929,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     } else if (v1 == v3) {
                         sh_value = std::string(v0) + " " + std::string(v1) + " " + std::string(v2);
                     }
-                } else if (longhands.size() == 2) {
+                } else if (longhands.size() == 2 && !SLASH_BETWEEN_ALL.count(shorthand)) {
                     std::string_view v0 = decls[prop_map[longhands[0]]].value;
                     std::string_view v1 = decls[prop_map[longhands[1]]].value;
                     if (v0 == v1) {
@@ -951,7 +967,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             // initial is not 0.
             else if (!has_all && longhands.size() == 4) {
                 static const std::unordered_set<std::string_view> PARTIAL_4_UNSAFE = {
-                    "border-style", "border-color"
+                    "border-style", "border-color", "grid-area"
                 };
                 if (PARTIAL_4_UNSAFE.find(shorthand) == PARTIAL_4_UNSAFE.end()) {
                     // Count how many longhands are present and build the 4-value string
