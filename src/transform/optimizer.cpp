@@ -931,6 +931,135 @@ static size_t strip_unreferenced_functions(std::string& js) {
     return removed;
 }
 
+// ---- Fold array-esque calls to spread syntax ----
+// Array.from(expr) → [...expr]  (saves 9 bytes)
+// [].slice.call(expr) → [...expr]  (saves 16 bytes)
+// Array.prototype.slice.call(expr) → [...expr]
+// Skips cases where Array.from has a second argument (mapping function).
+// Only transforms when the call has a single argument.
+static size_t fold_spread_patterns(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_ident = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
+    };
+
+    // Helper: find matching closing paren from open_pos; returns end pos (one past ')')
+    auto find_closing_paren = [&](const std::string& s, size_t open_pos) -> size_t {
+        int depth = 1;
+        size_t scan = open_pos + 1;
+        while (scan < s.size() && depth > 0) {
+            if (!inside_string(scan)) {
+                if (s[scan] == '(') depth++;
+                else if (s[scan] == ')') depth--;
+            }
+            scan++;
+        }
+        if (depth != 0) return std::string::npos;
+        return scan; // one past closing paren
+    };
+
+    // Helper: check if argument list (between parens) has a top-level comma
+    auto has_top_level_comma = [&](const std::string& args) -> bool {
+        int d = 0;
+        for (size_t i = 0; i < args.size(); i++) {
+            if (!inside_string(i)) {
+                if (args[i] == '(' || args[i] == '[' || args[i] == '{') d++;
+                else if (args[i] == ')' || args[i] == ']' || args[i] == '}') d--;
+                else if (args[i] == ',' && d == 0) return true;
+            }
+        }
+        return false;
+    };
+
+    size_t replacements = 0;
+
+    // --- Pattern 1: Array.from(expr) ---
+    {
+        const std::string needle = "Array.from(";
+        size_t pos = 0;
+        while ((pos = js.find(needle, pos)) != std::string::npos) {
+            if (inside_string(pos)) { pos += needle.size(); continue; }
+
+            // Verify 'A' is at start of identifier
+            if (pos > 0 && is_ident(js[pos - 1])) { pos++; continue; }
+
+            size_t open_pos = pos + needle.size() - 1; // position of '('
+            size_t close_end = find_closing_paren(js, open_pos);
+            if (close_end == std::string::npos) { pos++; continue; }
+            size_t close_pos = close_end - 1;
+
+            // Extract args between parens
+            std::string args = js.substr(open_pos + 1, close_pos - open_pos - 1);
+            if (has_top_level_comma(args)) { pos = close_end; continue; }
+
+            // Replace Array.from(arg) with [...arg]
+            std::string replacement = "[..." + args + "]";
+            js.replace(pos, close_end - pos, replacement);
+            replacements++;
+            pos += replacement.size();
+        }
+    }
+
+    // --- Pattern 2: [].slice.call(expr) ---
+    {
+        const std::string needle = "[].slice.call(";
+        size_t pos = 0;
+        while ((pos = js.find(needle, pos)) != std::string::npos) {
+            if (inside_string(pos)) { pos += needle.size(); continue; }
+
+            size_t open_pos = pos + needle.size() - 1;
+            size_t close_end = find_closing_paren(js, open_pos);
+            if (close_end == std::string::npos) { pos++; continue; }
+            size_t close_pos = close_end - 1;
+
+            std::string args = js.substr(open_pos + 1, close_pos - open_pos - 1);
+            if (has_top_level_comma(args)) { pos = close_end; continue; }
+
+            std::string replacement = "[..." + args + "]";
+            js.replace(pos, close_end - pos, replacement);
+            replacements++;
+            pos += replacement.size();
+        }
+    }
+
+    // --- Pattern 3: Array.prototype.slice.call(expr) ---
+    {
+        const std::string needle = "Array.prototype.slice.call(";
+        size_t pos = 0;
+        while ((pos = js.find(needle, pos)) != std::string::npos) {
+            if (inside_string(pos)) { pos += needle.size(); continue; }
+
+            if (pos > 0 && is_ident(js[pos - 1])) { pos++; continue; }
+
+            size_t open_pos = pos + needle.size() - 1;
+            size_t close_end = find_closing_paren(js, open_pos);
+            if (close_end == std::string::npos) { pos++; continue; }
+            size_t close_pos = close_end - 1;
+
+            std::string args = js.substr(open_pos + 1, close_pos - open_pos - 1);
+            if (has_top_level_comma(args)) { pos = close_end; continue; }
+
+            std::string replacement = "[..." + args + "]";
+            js.replace(pos, close_end - pos, replacement);
+            replacements++;
+            pos += replacement.size();
+        }
+    }
+
+    return replacements;
+}
+
 // Strip console.*(…) calls from JS text.
 // Matches console.log/warn/error/info/debug/trace/table/time/timeEnd/group/groupEnd/assert/count/countReset/dir.
 // Handles balanced parentheses and string literals to correctly find the closing ).
@@ -1752,6 +1881,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         }
         // Fold constant expressions
         opt_js = fold_constants_in_text(opt_js);
+        // Fold array-esque calls to spread syntax
+        fold_spread_patterns(opt_js);
 
         // --- String literal detection (scan current opt_js; AST stale after erasure) ---
         std::vector<std::pair<size_t, size_t>> string_ranges;
