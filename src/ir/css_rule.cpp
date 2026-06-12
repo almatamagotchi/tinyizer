@@ -1,5 +1,6 @@
 #include "css_rule.h"
 #include "dom_node.h"
+#include <string>
 
 namespace tinyizer {
 
@@ -37,6 +38,23 @@ std::vector<std::string_view> CSSRule::referenced_elements() const {
         }
     }
     return result;
+}
+
+std::string CSSRule::selector_text() const {
+    if (selectors_.empty()) return "";
+    std::string out;
+    for (const auto& part : selectors_[0]) {
+        switch (part.type) {
+        case SelectorPart::Type::ELEMENT: out += part.value; break;
+        case SelectorPart::Type::CLASS: out += '.'; out += part.value; break;
+        case SelectorPart::Type::ID: out += '#'; out += part.value; break;
+        case SelectorPart::Type::ATTR: out += '['; out += part.value; out += ']'; break;
+        case SelectorPart::Type::PSEUDO: out += part.value; break;
+        case SelectorPart::Type::COMBINATOR: out += part.value; break;
+        case SelectorPart::Type::UNIVERSAL: out += '*'; break;
+        }
+    }
+    return out;
 }
 
 bool CSSRule::could_match(const DOMNode& node) const {

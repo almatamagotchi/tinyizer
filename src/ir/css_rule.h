@@ -59,6 +59,9 @@ public:
     std::vector<std::string_view> referenced_ids() const;
     std::vector<std::string_view> referenced_elements() const;
 
+    // Reconstruct the text of the first selector (for cascade analysis)
+    std::string selector_text() const;
+
     // Check if this rule could match a DOM node (simplified cascade simulation)
     bool could_match(const class DOMNode& node) const;
 

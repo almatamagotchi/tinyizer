@@ -658,6 +658,46 @@ std::string minify_css_value(const std::string& value) {
     return result;
 }
 
+// Check if a partial merge is cascade-safe: ensure no later rule with the
+// same first selector sets one of the missing longhands that we'd fill with
+// "0". Without this, the merged shorthand (setting all sides) would override
+// a later rule that sets a specific side on the same element.
+static bool partial_merge_cascade_safe(
+    const std::vector<CSSRule>& rules, size_t rule_idx,
+    const std::unordered_map<std::string_view, size_t>& prop_map,
+    const std::vector<std::string_view>& longhands)
+{
+    // Identify which longhands are missing (would be filled with defaults)
+    bool any_missing = false;
+    for (auto lh : longhands) {
+        if (prop_map.find(lh) == prop_map.end()) {
+            any_missing = true;
+            break;
+        }
+    }
+    if (!any_missing) return true;  // full merge, always safe
+
+    // Get current rule's first-selector text
+    if (rules[rule_idx].selectors().empty()) return true;
+    std::string sel_text = rules[rule_idx].selector_text();
+    if (sel_text.empty()) return true;
+
+    // Check later rules with the same first-selector text
+    for (size_t j = rule_idx + 1; j < rules.size(); j++) {
+        const auto& later = rules[j];
+        if (later.selectors().empty()) continue;
+        if (later.selector_text() != sel_text) continue;
+        // Same selector – if it sets a missing longhand, we'd override it
+        for (const auto& decl : later.declarations()) {
+            for (auto lh : longhands) {
+                if (prop_map.find(lh) == prop_map.end() && decl.property == lh)
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
     bool changed = false;
 
@@ -703,7 +743,9 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"transition-delay", "transition"},
     };
 
-    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+    auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
+    for (size_t rule_idx = 0; rule_idx < rules.size(); rule_idx++) {
+        auto& rule = rules[rule_idx];
         auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
 
         // Build a map of property -> index
@@ -839,29 +881,35 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
 
                     // Need at least 2 longhands for the merge to be worthwhile
                     if (present_count >= 2) {
-                        std::string sh_value = std::string(values[0]) + " " + std::string(values[1]) +
-                                               " " + std::string(values[2]) + " " + std::string(values[3]);
+                        // Cascade-safe check: don't merge if a later rule
+                        // targeting the same selector sets a missing side
+                        if (!partial_merge_cascade_safe(rules, rule_idx, prop_map, longhands)) {
+                            // skip: merge would override later declarations
+                        } else {
+                            std::string sh_value = std::string(values[0]) + " " + std::string(values[1]) +
+                                                   " " + std::string(values[2]) + " " + std::string(values[3]);
 
-                        sh_value = minify_css_value(sh_value);
+                            sh_value = minify_css_value(sh_value);
 
-                        CSSRule::Declaration sh_decl;
-                        sh_decl.property = doc.string_pool().intern(shorthand);
-                        sh_decl.value = doc.string_pool().intern(sh_value);
-                        decls.push_back(sh_decl);
+                            CSSRule::Declaration sh_decl;
+                            sh_decl.property = doc.string_pool().intern(shorthand);
+                            sh_decl.value = doc.string_pool().intern(sh_value);
+                            decls.push_back(sh_decl);
 
-                        // Remove merged longhands (reverse order for stable indices)
-                        for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
-                            auto pit = prop_map.find(*it);
-                            if (pit != prop_map.end() && pit->second < decls.size()) {
-                                decls.erase(decls.begin() + pit->second);
-                                prop_map.clear();
-                                for (size_t j = 0; j < decls.size(); j++) {
-                                    prop_map[decls[j].property] = j;
+                            // Remove merged longhands (reverse order for stable indices)
+                            for (auto it = longhands.rbegin(); it != longhands.rend(); ++it) {
+                                auto pit = prop_map.find(*it);
+                                if (pit != prop_map.end() && pit->second < decls.size()) {
+                                    decls.erase(decls.begin() + pit->second);
+                                    prop_map.clear();
+                                    for (size_t j = 0; j < decls.size(); j++) {
+                                        prop_map[decls[j].property] = j;
+                                    }
                                 }
                             }
-                        }
 
-                        changed = true;
+                            changed = true;
+                        }
                     }
                 }
             }
