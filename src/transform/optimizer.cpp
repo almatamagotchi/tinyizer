@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstring>
 #include <iostream>
+#include <regex>
 
 namespace tinyizer {
 
@@ -1476,6 +1477,35 @@ static void scan_string_ranges_in_text(const std::string& text,
     std::sort(ranges.begin(), ranges.end());
 }
 
+// Fold "literal" + expr + "literal" into template literal `literal${expr}literal`
+// after renaming is complete so identifiers inside ${} use their final names.
+static void fold_template_literals_post_rename(std::string& js) {
+    // Matches: quote text quote + ident + quote text quote (same quote type)
+    static std::regex tl_re(
+        R"((['\"])([^'\"\\]*?)\1\s*\+\s*([a-zA-Z_$][\w.$\[\]?'"]*?)\s*\+\s*(['\"])([^'\"\\]*?)\4)"
+    );
+    bool changed = true;
+    int iters = 0;
+    while (changed && iters < 20) {
+        changed = false;
+        iters++;
+        std::smatch m;
+        if (std::regex_search(js, m, tl_re)) {
+            std::string a = m[2].str();
+            std::string b = m[5].str();
+            if (a.find('`') == std::string::npos &&
+                b.find('`') == std::string::npos) {
+                std::string expr = m[3].str();
+                if (expr.find('\n') == std::string::npos && expr.size() < 200) {
+                    std::string tl = "`" + a + "${" + expr + "}" + b + "`";
+                    js = m.prefix().str() + tl + m.suffix().str();
+                    changed = true;
+                }
+            }
+        }
+    }
+}
+
 // ---- JS string-literal replacement for renamed classes/IDs ----
 // After the optimization loop renames HTML/CSS class and ID values,
 // this updates string literals in optimized JS (getElementById, classList,
@@ -1897,6 +1927,10 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
             safe_rename_identifier(opt_js, old_name, new_name,
                                    string_ranges.empty() ? nullptr : &string_ranges);
         }
+
+        // Template literal folding: must run AFTER renaming so that
+        // identifiers inside ${} use their final short names.
+        fold_template_literals_post_rename(opt_js);
 
         // JS minification
         opt_js = minify_js_text(opt_js);
