@@ -708,6 +708,21 @@ static size_t strip_orphan_assignments(std::string& js) {
             }
 
             if (!appears_elsewhere) {
+                // Check if the RHS contains a function call (side effect).
+                // If so, don't strip — the call must be preserved even though
+                // the assignment target is unused.
+                bool has_side_effect = false;
+                for (size_t i = pos + 1; i < stmt_end && i < js.size(); i++) {
+                    if (js[i] == '(' && !inside_string(i)) {
+                        has_side_effect = true;
+                        break;
+                    }
+                }
+                if (has_side_effect) {
+                    pos = stmt_end + 1;
+                    continue;
+                }
+
                 // Skip leading whitespace before erasing
                 size_t erase_start = id_start;
                 while (erase_start > 0 && (js[erase_start - 1] == ' ' || js[erase_start - 1] == ';')) {
