@@ -62,6 +62,7 @@ private:
     bool pass_css_value_fold(UnifiedDocument& doc);
     bool pass_css_math_fold(UnifiedDocument& doc);
     bool pass_css_default_strip(UnifiedDocument& doc);
+    bool pass_css_dedup_rules(UnifiedDocument& doc);
     bool pass_js_constant_fold(UnifiedDocument& doc);
     bool pass_brotli_reorder(UnifiedDocument& doc);
     bool pass_obfuscation(UnifiedDocument& doc);

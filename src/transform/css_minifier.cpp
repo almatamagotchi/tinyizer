@@ -178,4 +178,65 @@ bool Optimizer::pass_css_default_strip(UnifiedDocument& doc) {
     return changed;
 }
 
+// Merge adjacent CSS rules with identical declarations into a single
+// comma-separated selector rule.  Cascade-safe because adjacent rules
+// share the same cascade position.
+//
+// Example: .a{color:red;margin:0}.b{color:red;margin:0}
+//       → .a,.b{color:red;margin:0}
+bool Optimizer::pass_css_dedup_rules(UnifiedDocument& doc) {
+    auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
+    bool changed = false;
+
+    for (size_t i = 0; i + 1 < rules.size(); ) {
+        CSSRule& left = rules[i];
+        CSSRule& right = rules[i + 1];
+
+        // Only merge non-at-rules
+        if (left.is_at_rule() || right.is_at_rule()) {
+            i++;
+            continue;
+        }
+
+        const auto& da = left.declarations();
+        const auto& db = right.declarations();
+
+        // Quick check: must have same number of declarations
+        if (da.size() != db.size()) {
+            i++;
+            continue;
+        }
+
+        // Compare declarations — order matters for rendering in some
+        // edge cases (e.g., same property appearing twice).  For
+        // minified CSS the order is deterministic, so a linear scan
+        // is sufficient.
+        bool identical = true;
+        for (size_t j = 0; j < da.size(); j++) {
+            if (da[j].property != db[j].property || da[j].value != db[j].value) {
+                identical = false;
+                break;
+            }
+        }
+
+        if (!identical) {
+            i++;
+            continue;
+        }
+
+        // Merge selectors from right into left
+        auto& left_selectors = const_cast<std::vector<std::vector<CSSRule::SelectorPart>>&>(left.selectors());
+        for (const auto& sel : right.selectors()) {
+            left_selectors.push_back(sel);
+        }
+
+        // Remove the right rule
+        rules.erase(rules.begin() + i + 1);
+        changed = true;
+        // Don't increment i — the new i+1 might also be identical
+    }
+
+    return changed;
+}
+
 } // namespace tinyizer

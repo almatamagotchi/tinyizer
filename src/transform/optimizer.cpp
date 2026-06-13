@@ -708,15 +708,31 @@ static size_t strip_orphan_assignments(std::string& js) {
             }
 
             if (!appears_elsewhere) {
-                // Check if the RHS contains a function call (side effect).
-                // If so, don't strip — the call must be preserved even though
-                // the assignment target is unused.
+                // Check if the RHS calls a user-defined function (potential
+                // side effect).  If the call target name appears in a
+                // "function <name>(" declaration elsewhere in the JS,
+                // preserve the statement.
                 bool has_side_effect = false;
-                for (size_t i = pos + 1; i < stmt_end && i < js.size(); i++) {
+                for (size_t i = pos + 1; i + 2 < stmt_end && i < js.size(); ) {
                     if (js[i] == '(' && !inside_string(i)) {
-                        has_side_effect = true;
-                        break;
+                        // Walk backward from '(' to find the function name
+                        size_t name_end = i;
+                        while (name_end > pos + 1 && js[name_end - 1] == ' ')
+                            name_end--;
+                        size_t name_start = name_end;
+                        while (name_start > pos && is_ident(js[name_start - 1]))
+                            name_start--;
+                        if (name_start < name_end) {
+                            std::string callee(js, name_start, name_end - name_start);
+                            // Search for "function <callee>(" in the full JS
+                            std::string pattern = "function " + callee + "(";
+                            if (js.find(pattern) != std::string::npos) {
+                                has_side_effect = true;
+                                break;
+                            }
+                        }
                     }
+                    i++;
                 }
                 if (has_side_effect) {
                     pos = stmt_end + 1;
@@ -2554,6 +2570,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
             changed_this_iteration = true;
 
         if (config_.enable_css_minify && pass_css_default_strip(doc))
+            changed_this_iteration = true;
+
+        if (config_.enable_css_shorthand && pass_css_dedup_rules(doc))
             changed_this_iteration = true;
 
         if (config_.enable_html_minify && pass_html_minify(doc))
