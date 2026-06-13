@@ -320,6 +320,33 @@ std::string minify_css_value(const std::string& value) {
             }
         }
 
+        // Check for 3-digit hex color (#abc)
+        if (i + 3 < value.size() && value[i] == '#') {
+            bool is_hex = true;
+            for (size_t j = 1; j <= 3; j++) {
+                if (!is_hex_digit(value[i + j])) { is_hex = false; break; }
+            }
+            // Must not be part of a longer hex — next char must not be hex digit
+            if (is_hex && (i + 5 > value.size() || !is_hex_digit(value[i + 4]))) {
+                // Expand to full hex for lookup: #abc → aabbcc
+                char e0 = value[i + 1], e1 = value[i + 2], e2 = value[i + 3];
+                std::string full(6, ' ');
+                full[0] = e0; full[1] = e0;
+                full[2] = e1; full[3] = e1;
+                full[4] = e2; full[5] = e2;
+
+                auto nc = NAMED_COLOR.find(full);
+                if (nc != NAMED_COLOR.end() && nc->second.size() < 4) {
+                    // Named color is shorter than #abc
+                    result += nc->second;
+                } else {
+                    result += value.substr(i, 4);
+                }
+                i += 4;
+                continue;
+            }
+        }
+
         // Check for rgb() / rgba()
         if (i + 4 < value.size() && tolower(value[i]) == 'r' && tolower(value[i+1]) == 'g' && tolower(value[i+2]) == 'b') {
             bool is_rgba = false;
