@@ -151,11 +151,24 @@ bool CSSParser::parse_at_rule(CSSRule& rule, std::string_view at_name) {
     }
     std::string_view prelude = tok_->substr(prelude_start, tok_->pos());
 
+    // Strip leading/trailing whitespace from the prelude.
+    // A space between the at-rule name and `{` should not become a selector.
+    while (!prelude.empty() && (prelude[0] == ' ' || prelude[0] == '\t' ||
+           prelude[0] == '\r' || prelude[0] == '\n'))
+        prelude.remove_prefix(1);
+    while (!prelude.empty() && (prelude.back() == ' ' || prelude.back() == '\t' ||
+           prelude.back() == '\r' || prelude.back() == '\n'))
+        prelude.remove_suffix(1);
+
     if (!prelude.empty()) {
         CSSRule::SelectorPart part;
         part.type = CSSRule::SelectorPart::Type::ELEMENT;
         part.value = pool_.intern(prelude);
         rule.add_selector_part(part);
+        // Commit the selector part to the selectors_ list so the
+        // serializer emits it.  (parse_at_rule skips parse_ruleset
+        // where add_selector would normally be called.)
+        rule.add_selector(std::vector<CSSRule::SelectorPart>(rule.selector_parts()));
     }
 
     if (tok_->peek() == ';') {

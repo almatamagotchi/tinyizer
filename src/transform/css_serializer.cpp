@@ -91,11 +91,45 @@ std::string serialize_css(const std::vector<CSSRule>& rules) {
                 // (e.g., @media screen{...}).  Prepend a space to restore it —
                 // a single space before `{` or before a selector is harmless.
                 std::string minified_body = minify_css_text(rule.raw_body());
+                // Fix: minify_css_text strips spaces between CSS keywords
+                // like `and` / `or` / `not` and an opening `(`, which breaks
+                // media-query syntax (e.g. `screen and(max-width:...)`).
+                // Restore those mandatory spaces.
+                {
+                    std::string fixed;
+                    fixed.reserve(minified_body.size() + 16);
+                    for (size_t i = 0; i < minified_body.size(); i++) {
+                        char ch = minified_body[i];
+                        fixed += ch;
+                        if (ch == '(' && fixed.size() >= 2) {
+                            // Scan backward in *fixed* (which may have grown
+                            // from previous space insertions) to find the
+                            // preceding word, if any.
+                            int j = (int)fixed.size() - 2;  // char before '(' in fixed
+                            int word_len = 0;
+                            while (j >= 0 && isalpha((unsigned char)fixed[j])) {
+                                word_len++;
+                                j--;
+                            }
+                            if (word_len >= 2 && word_len <= 4) {
+                                const char* word_start = &fixed[j + 1];
+                                std::string_view kw(word_start, word_len);
+                                if (kw == "and" || kw == "or" || kw == "not" ||
+                                    kw == "only") {
+                                    fixed.insert(fixed.size() - 1, " ");
+                                }
+                            }
+                        }
+                    }
+                    minified_body = std::move(fixed);
+                }
                 out += ' ';
                 out += minified_body;
                 continue;
             }
-            out += '{';
+            // At-rules without raw_body (e.g., @font-face, @page) flow
+            // through to the normal selector+declaration logic below.
+            // Do NOT emit '{' here — line 138 handles that.
         }
 
         // Multiple selectors
