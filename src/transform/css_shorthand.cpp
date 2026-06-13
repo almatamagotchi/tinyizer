@@ -1482,6 +1482,13 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                     if (val != "normal" && val != "400") { sh_value += std::string(val) + ' '; }
                 }
 
+                // Optional: font-stretch (omit when default: normal)
+                it = prop_map.find("font-stretch");
+                if (it != prop_map.end()) {
+                    auto val = decls[it->second].value;
+                    if (val != "normal") { sh_value += std::string(val) + ' '; }
+                }
+
                 // Required: font-size
                 sh_value += std::string(decls[sz_it->second].value);
 
@@ -1503,7 +1510,7 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
 
                 // Remove subsumed font longhands
                 static const std::string_view font_longhands[] = {
-                    "font-style","font-variant","font-weight",
+                    "font-style","font-variant","font-weight","font-stretch",
                     "font-size","line-height","font-family"
                 };
                 for (auto lh : font_longhands) {
