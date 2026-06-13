@@ -24,6 +24,27 @@ static void scan_string_ranges_in_text(const std::string& text,
 // Removing the `var ` saves 4 bytes per declaration. Strips at brace depth 0
 // (top‑level global), inside for‑loop initializers, and inside function scopes
 // when the declaration is single‑variable (no comma‑separated multi‑decl).
+// ---- Strip JS single-line comments ----
+static size_t strip_js_comments(std::string& js) {
+    std::string result;
+    result.reserve(js.size());
+    size_t i = 0;
+    while (i < js.size()) {
+        // Check for // comment
+        if (js[i] == '/' && i + 1 < js.size() && js[i + 1] == '/') {
+            // Skip to end of line
+            while (i < js.size() && js[i] != '\n') i++;
+            if (i < js.size()) { result += '\n'; i++; }
+            continue;
+        }
+        result += js[i];
+        i++;
+    }
+    size_t removed = js.size() - result.size();
+    js = std::move(result);
+    return removed;
+}
+
 static size_t strip_var_keywords(std::string& js) {
     // Skip if strict mode directive is present
     if (js.find("\"use strict\"") == 0 || js.find("'use strict'") == 0) return 0;
@@ -639,6 +660,20 @@ static size_t strip_orphan_assignments(std::string& js) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
     };
 
+    auto inside_comment = [&](size_t i) -> bool {
+        // Walk backwards from i to find start of line, check for //
+        // This handles single-line comments only (only type present
+        // after early JS passes that strip multi-line comments).
+        size_t line_start = i;
+        while (line_start > 0 && js[line_start - 1] != '\n' && js[line_start - 1] != '\r')
+            line_start--;
+        // Check for // between line_start and i
+        for (size_t j = line_start; j + 1 < i; j++) {
+            if (js[j] == '/' && js[j + 1] == '/') return true;
+        }
+        return false;
+    };
+
     size_t removed = 0;
     int depth = 0;
 
@@ -654,7 +689,7 @@ static size_t strip_orphan_assignments(std::string& js) {
         }
 
         // At top level, look for identifier = value;
-        if (depth == 0 && !inside_string(pos) && is_ident(c) &&
+        if (depth == 0 && !inside_string(pos) && !inside_comment(pos) && is_ident(c) &&
             !std::isdigit(static_cast<unsigned char>(c))) {
 
             size_t id_start = pos;
@@ -670,6 +705,20 @@ static size_t strip_orphan_assignments(std::string& js) {
             if (pos >= js.size() || js[pos] != '=' || inside_string(pos)) {
                 pos = id_end;
                 continue;
+            }
+
+            // Check if this identifier is a property access (preceded by '.')
+            // e.g., obj.prop = value — NOT a standalone variable assignment.
+            // Skip property assignments; they can't be orphaned since they have
+            // side effects (setting a property on an object).
+            {
+                size_t before = id_start;
+                while (before > 0 && (js[before - 1] == ' ' || js[before - 1] == '\t'))
+                    before--;
+                if (before > 0 && js[before - 1] == '.') {
+                    pos = id_end;
+                    continue;
+                }
             }
 
             // Find statement end (semicolon at depth 0, outside strings)
@@ -1663,9 +1712,9 @@ static size_t inline_single_call_functions(std::string& js) {
                 call_erase_start = assign_erase;
             }
 
-             js.replace(call_erase_start, call_erase_end - call_erase_start,
-                        inlined_body + ";");
-            inlined++;
+              js.replace(call_erase_start, call_erase_end - call_erase_start,
+                         inlined_body + ";");
+             inlined++;
             any_inlined = true;
             break; // positions invalidated, re-scan
 
@@ -2680,6 +2729,9 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // Strip functions that became unreferenced after console stripping
         // (e.g., greet() only called via console.log(greet("World")))
         strip_unreferenced_functions(opt_js);
+        // Strip single-line comments before other JS passes to prevent
+        // comment text from joining adjacent identifiers
+        strip_js_comments(opt_js);
         // Strip 'var' keyword from top-level declarations (non-strict mode)
         // saves 4 bytes per global var: var x=1; → x=1;
         strip_var_keywords(opt_js);
@@ -2694,8 +2746,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // Inline single-call function declarations: if a top-level function
         // is called exactly once as a statement, replace the call with the
         // body and remove the declaration.
-        inline_single_call_functions(opt_js);
-        strip_orphan_assignments(opt_js);
+          inline_single_call_functions(opt_js);
+          strip_orphan_assignments(opt_js);
         // Re-run function elimination: inlining can orphan previously-referenced functions
         strip_empty_functions(opt_js);
         strip_unreferenced_functions(opt_js);
