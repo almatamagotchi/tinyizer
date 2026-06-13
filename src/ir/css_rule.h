@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include <string_view>
 #include <vector>
 #include <memory>
@@ -53,6 +54,15 @@ public:
     std::string_view at_rule_name() const { return at_rule_name_; }
     void set_at_rule_name(std::string_view name) { at_rule_name_ = name; }
 
+    // Raw body for at-rules whose content contains nested rules (@media, @keyframes, etc.)
+    // that the parser can't fully represent in the flat declaration model.
+    // When set, this replaces the standard selector + declarations serialization.
+    // Stored as a string copy (not string_view) because the original CSS buffer
+    // may be moved after parsing.
+    bool has_raw_body() const { return !raw_body_.empty(); }
+    const std::string& raw_body() const { return raw_body_; }
+    void set_raw_body(std::string body) { raw_body_ = std::move(body); }
+
     // Does this rule's *first* selector reference a specific identifier?
     // (used for cross-language identifier tracking)
     std::vector<std::string_view> referenced_classes() const;
@@ -70,6 +80,7 @@ private:
     std::vector<Declaration> declarations_;
     bool is_at_rule_ = false;
     std::string_view at_rule_name_;
+    std::string raw_body_;  // for at-rules with nested content (@media, @keyframes, etc.)
     // Legacy flat storage, used during parsing
     std::vector<SelectorPart> selector_parts_;
 };

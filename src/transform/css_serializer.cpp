@@ -84,6 +84,17 @@ std::string serialize_css(const std::vector<CSSRule>& rules) {
         if (rule.is_at_rule()) {
             out += '@';
             out += rule.at_rule_name();
+            if (rule.has_raw_body()) {
+                // Apply text-level CSS minification to the raw body.
+                // minify_css_text strips leading whitespace, which could eat
+                // the space between the at-rule name and its prelude
+                // (e.g., @media screen{...}).  Prepend a space to restore it —
+                // a single space before `{` or before a selector is harmless.
+                std::string minified_body = minify_css_text(rule.raw_body());
+                out += ' ';
+                out += minified_body;
+                continue;
+            }
             out += '{';
         }
 

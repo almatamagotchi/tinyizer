@@ -164,8 +164,39 @@ bool CSSParser::parse_at_rule(CSSRule& rule, std::string_view at_name) {
     }
 
     if (tok_->match('{')) {
-        // Parse the body — for @media, it contains nested rules
-        // For @font-face / @keyframes, it contains declarations
+        // For at-rules known to contain nested rules/blocks (@media, @supports,
+        // @keyframes, @document, @scope, @layer, @container), store the raw body
+        // text so we can emit it faithfully.  Our declaration model can't
+        // represent nested structure.
+        static const std::unordered_set<std::string_view> NESTED_AT_RULES = {
+            "media", "supports", "keyframes", "-webkit-keyframes",
+            "-moz-keyframes", "-o-keyframes", "document", "scope",
+            "layer", "container",
+        };
+        bool store_raw = NESTED_AT_RULES.count(at_name) > 0;
+
+        if (store_raw) {
+            // Capture the full body text: prelude + `{...}`.
+            // We already consumed the opening `{`.  Walk back to include it
+            // in the raw body along with the prelude.
+            // body covers everything from the first char after the at-name
+            // to the matching `}`.
+            size_t body_start = prelude_start;
+            // We're currently past the opening `{`.
+            // Walk forward from here through the body content.
+            int depth = 1;
+            while (!tok_->eof() && depth > 0) {
+                char c = tok_->advance();
+                if (c == '{') depth++;
+                else if (c == '}') depth--;
+            }
+            size_t body_end = tok_->pos();  // one past the closing `}`
+            std::string_view raw_body = tok_->substr(body_start, body_end);
+            rule.set_raw_body(std::string(raw_body));
+            return true;
+        }
+
+        // Parse the body — for @font-face / @page, it contains declarations
         while (!tok_->eof()) {
             tok_->skip_whitespace();
 
