@@ -1603,6 +1603,35 @@ static size_t inline_single_call_functions(std::string& js) {
             if (call_erase_end < js.size() && js[call_erase_end] == ';')
                 call_erase_end++;
 
+            // If the call is in an assignment context (lhs = func()),
+            // strip the LHS and = since the function has no return value
+            // and the assignment target would become dead code.
+            size_t assign_erase = call_erase_start;
+            while (assign_erase > 0 && js[assign_erase - 1] == ' ')
+                assign_erase--;
+            if (assign_erase > 0 && js[assign_erase - 1] == '=') {
+                assign_erase--;  // consume =
+                // Scan back to statement boundary or identifier
+                while (assign_erase > 0 && js[assign_erase - 1] == ' ')
+                    assign_erase--;
+                while (assign_erase > 0 &&
+                       (isalnum(static_cast<unsigned char>(js[assign_erase - 1])) ||
+                        js[assign_erase - 1] == '_' || js[assign_erase - 1] == '$'))
+                    assign_erase--;
+                // Include any preceding var/let/const keyword
+                while (assign_erase > 0 && js[assign_erase - 1] == ' ')
+                    assign_erase--;
+                if (assign_erase >= 3) {
+                    std::string kw = js.substr(assign_erase - 3, 3);
+                    if (kw == "var" || kw == "let") assign_erase -= 3;
+                }
+                if (assign_erase >= 5) {
+                    std::string kw = js.substr(assign_erase - 5, 5);
+                    if (kw == "const") assign_erase -= 5;
+                }
+                call_erase_start = assign_erase;
+            }
+
              js.replace(call_erase_start, call_erase_end - call_erase_start,
                         inlined_body + ";");
             inlined++;
