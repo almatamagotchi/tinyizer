@@ -885,6 +885,146 @@ std::string propagate_const_literals(const std::string& js) {
     return result;
 }
 
+// Shorten numeric literals: 1000 -> 1e3, .5 optional, 1.0 -> 1
+static std::string shorten_numeric_literals(const std::string& js) {
+    std::string result;
+    result.reserve(js.size());
+    bool in_string = false;
+    char str_char = 0;
+    bool in_tmpl = false;
+    bool in_regex = false;
+
+    size_t i = 0;
+    while (i < js.size()) {
+        char c = js[i];
+        char n = (i + 1 < js.size()) ? js[i + 1] : 0;
+
+        if (in_string) {
+            if (c == '\\') { result += c; result += n; i += 2; continue; }
+            if (c == str_char) in_string = false;
+            result += c; i++; continue;
+        }
+        if (in_tmpl) {
+            if (c == '\\') { result += c; result += n; i += 2; continue; }
+            if (c == '`') in_tmpl = false;
+            result += c; i++; continue;
+        }
+        if (in_regex) {
+            if (c == '\\') { result += c; result += n; i += 2; continue; }
+            if (c == '/') in_regex = false;
+            result += c; i++; continue;
+        }
+        if (c == '"' || c == '\'') { in_string = true; str_char = c; result += c; i++; continue; }
+        if (c == '`') { in_tmpl = true; result += c; i++; continue; }
+        if (c == '/' && n != '/' && n != '*') {
+            char prev = result.empty() ? 0 : result.back();
+            if (prev == '(' || prev == '=' || prev == '!' || prev == '&' ||
+                prev == '|' || prev == '{' || prev == ';' || prev == ':' ||
+                prev == '[' || prev == ',' || prev == '?' || prev == '~') {
+                in_regex = true; result += c; i++; continue;
+            }
+        }
+
+        // Check for 0x/0X/0o/0O/0b/0B — pass through unchanged
+        if (c == '0' && (n == 'x' || n == 'X' || n == 'o' || n == 'O' || n == 'b' || n == 'B')) {
+            result += c; result += n; i += 2;
+            while (i < js.size() && std::isxdigit(static_cast<unsigned char>(js[i])))
+                result += js[i++];
+            if (i < js.size() && js[i] == 'n') { result += 'n'; i++; }
+            continue;
+        }
+
+        // Detect numeric literal start
+        bool is_digit_start = std::isdigit(static_cast<unsigned char>(c));
+        bool is_decimal_start = (c == '.' && n && std::isdigit(static_cast<unsigned char>(n)));
+        if (!is_digit_start && !is_decimal_start) {
+            result += c; i++; continue;
+        }
+
+        char prev = result.empty() ? 0 : result.back();
+        if (!result.empty() && (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_' || prev == '$')) {
+            result += c; i++; continue;
+        }
+
+        // Extract numeric literal
+        std::string lit;
+        lit += c;
+        i++;
+        while (i < js.size()) {
+            char nc = js[i];
+            if (std::isdigit(static_cast<unsigned char>(nc)) || nc == '.' || nc == 'e' || nc == 'E' || nc == '+' || nc == '-') {
+                lit += nc;
+                i++;
+            } else {
+                break;
+            }
+        }
+        if (i < js.size() && js[i] == 'n' && lit.find('.') == std::string::npos && lit.find('e') == std::string::npos && lit.find('E') == std::string::npos) {
+            lit += 'n';
+            i++;
+        }
+
+        std::string shortened = lit;
+        char* endp = nullptr;
+        double val = std::strtod(lit.c_str(), &endp);
+        if (endp && *endp == '\0') {
+            // Remove trailing .0 from integers (1.0 -> 1, 2.000 -> 2)
+            size_t dot = lit.find('.');
+            if (dot != std::string::npos && val == static_cast<long long>(val) && val != 0) {
+                bool all_zeros = true;
+                for (size_t j = dot + 1; j < lit.size(); j++) {
+                    if (lit[j] != '0') { all_zeros = false; break; }
+                }
+                if (all_zeros) {
+                    shortened = std::to_string(static_cast<long long>(val));
+                }
+            }
+
+            // Large integers to scientific: 1000 -> 1e3
+            long long ival = static_cast<long long>(val);
+            if (val == static_cast<double>(ival) && val != 0 && shortened == lit) {
+                long long aval = std::llabs(ival);
+                int digits = 0;
+                long long tmp = aval;
+                while (tmp > 0) { digits++; tmp /= 10; }
+                int exp = digits - 1;
+                long long mantissa = aval;
+                for (int j = 0; j < exp; j++) mantissa /= 10;
+                if (digits >= 4 && mantissa < 10 && mantissa > 0) {
+                    long long remainder = aval - mantissa * static_cast<long long>(std::pow(10.0, exp));
+                    if (remainder == 0) {
+                        char buf[64];
+                        if (ival < 0) snprintf(buf, sizeof(buf), "-%llde%d", mantissa, exp);
+                        else snprintf(buf, sizeof(buf), "%llde%d", mantissa, exp);
+                        shortened = buf;
+                    }
+                }
+            }
+
+            // Small decimals to negative exponent: 0.001 -> 1e-3
+            if (val != 0 && val == val && shortened == lit && lit.find('e') == std::string::npos && lit.find('E') == std::string::npos) {
+                double abs_val = std::fabs(val);
+                if (abs_val < 0.001 && abs_val > 0) {
+                    int exp = 0;
+                    double tmp = abs_val;
+                    while (tmp < 1.0) { tmp *= 10; exp--; }
+                    long long mantissa = static_cast<long long>(std::round(tmp));
+                    while (mantissa % 10 == 0 && mantissa != 0) { mantissa /= 10; exp++; }
+                    if (mantissa > 0 && mantissa < 10) {
+                        char buf[64];
+                        if (val < 0) snprintf(buf, sizeof(buf), "-%llde%d", mantissa, exp);
+                        else snprintf(buf, sizeof(buf), "%llde%d", mantissa, exp);
+                        shortened = buf;
+                    }
+                }
+            }
+        }
+
+        result += shortened;
+    }
+    return result;
+}
+
 std::string fold_constants_in_text(const std::string& js) {
     // Apply all text-based constant folding passes
     if (js.empty()) return js;
@@ -943,6 +1083,14 @@ std::string fold_constants_in_text(const std::string& js) {
             any_change = true;
             result = std::move(folded);
         }
+
+        // Shorten numeric literals: 1000 -> 1e3, 1.0 -> 1, etc.
+        folded = shorten_numeric_literals(result);
+        if (folded != result) {
+            any_change = true;
+            result = std::move(folded);
+            continue;
+        }
     }
     
     return result;
@@ -965,4 +1113,4 @@ bool Optimizer::pass_js_constant_fold(UnifiedDocument& doc) {
     return changed;
 }
 
-} // namespace tinyizer
+}
