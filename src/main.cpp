@@ -111,6 +111,8 @@ int main(int argc, char* argv[]) {
             config.enable_cross_identifier = false;
         } else if (arg == "--no-shorthand") {
             config.enable_css_shorthand = false;
+        } else if (arg == "--no-remove-unused-custom-props") {
+            config.enable_remove_unused_custom_props = false;
         } else if (arg == "--brotli-order") {
             config.enable_brotli_reorder = true;
         } else if (arg == "--stats") {

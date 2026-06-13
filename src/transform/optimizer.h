@@ -9,6 +9,7 @@ struct OptimizationConfig {
     // Pass control
     bool enable_html_minify = true;
     bool enable_css_minify = true;
+    bool enable_remove_unused_custom_props = true;
     bool enable_js_minify = true;
     bool enable_cross_identifier = true;
     bool enable_dead_css = true;
@@ -63,6 +64,7 @@ private:
     bool pass_css_math_fold(UnifiedDocument& doc);
     bool pass_css_default_strip(UnifiedDocument& doc);
     bool pass_css_dedup_rules(UnifiedDocument& doc);
+    bool pass_css_remove_unused_custom_props(UnifiedDocument& doc);
     bool pass_js_constant_fold(UnifiedDocument& doc);
     bool pass_brotli_reorder(UnifiedDocument& doc);
     bool pass_obfuscation(UnifiedDocument& doc);

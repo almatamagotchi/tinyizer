@@ -197,11 +197,73 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         }
         // Also rename custom properties in declarations
         for (auto& decl : const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations())) {
-            auto it = rename_map.find(decl.property);
-            if (it != rename_map.end()) {
-                decl.property = doc.string_pool().intern(it->second);
+            const auto& prop = decl.property;
+            // Custom property: preserve -- prefix when renaming
+            if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
+                // Save original property name before renaming
+                std::string_view orig_prop = prop;
+
+                auto it = rename_map.find(prop);
+                if (it != rename_map.end()) {
+                    std::string renamed = "--" + it->second;
+                    decl.property = doc.string_pool().intern(renamed);
+                }
+            } else {
+                auto it = rename_map.find(decl.property);
+                if (it != rename_map.end()) {
+                    decl.property = doc.string_pool().intern(it->second);
+                }
             }
-            // Could also rename var() references in values, but that's complex
+
+            // Rename var(--name) references in ALL declaration values.
+            // Match against the ORIGINAL custom property names from rename_map.
+            if (rename_map.empty()) continue;
+            std::string_view val = decl.value;
+            if (val.find("var(--") == std::string_view::npos) continue;
+
+            std::string new_val;
+            size_t last_end = 0;
+            bool found_rename = false;
+
+            for (size_t pos = 0; pos + 6 <= val.size(); ) {
+                auto found = val.find("var(--", pos);
+                if (found == std::string_view::npos) break;
+
+                new_val.append(val.data() + last_end, found - last_end);
+
+                size_t name_start = found + 6;
+                size_t name_end = name_start;
+                while (name_end < val.size()) {
+                    char c = val[name_end];
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+                        name_end++;
+                    } else {
+                        break;
+                    }
+                }
+
+                if (name_end > name_start) {
+                    std::string full_ref = "--" + std::string(val.data() + name_start, name_end - name_start);
+                    auto rit = rename_map.find(full_ref);
+                    if (rit != rename_map.end()) {
+                        new_val += "var(--" + rit->second;
+                        found_rename = true;
+                    } else {
+                        new_val.append(val.data() + found, name_end - found);
+                    }
+                } else {
+                    new_val.append(val.data() + found, name_end - found);
+                }
+
+                last_end = name_end;
+                pos = name_end;
+            }
+
+            if (found_rename) {
+                new_val.append(val.data() + last_end, val.size() - last_end);
+                decl.value = doc.string_pool().intern(new_val);
+            }
         }
     }
 

@@ -239,4 +239,80 @@ bool Optimizer::pass_css_dedup_rules(UnifiedDocument& doc) {
     return changed;
 }
 
+// Remove custom property (--var) declarations that are never referenced
+// by var() calls anywhere in the document.  This pass runs after
+// pass_cross_identifier so that renamed custom property names are
+// consistent across declarations and references.
+//
+// Example: if the CSS contains `--unused: red` but no `var(--unused)`,
+// the declaration is stripped.
+bool Optimizer::pass_css_remove_unused_custom_props(UnifiedDocument& doc) {
+    // Collect all var() references: scan every declaration value in
+    // every rule for `var(--<name>` tokens.
+    std::unordered_set<std::string_view> used_custom_props;
+
+    for (const auto& rule : doc.stylesheets()) {
+        for (const auto& decl : rule.declarations()) {
+            const auto& val = decl.value;
+            // Search for "var(--" in the value
+            for (size_t pos = 0; pos + 6 <= val.size(); ) {
+                auto found = val.find("var(--", pos);
+                if (found == std::string_view::npos) break;
+
+                // Extract the custom property name: starts after "var(--"
+                size_t name_start = found + 6;  // "var(--" = 6 chars
+                size_t name_end = name_start;
+                while (name_end < val.size()) {
+                    char c = val[name_end];
+                    // Valid custom property name chars: alphanumeric, hyphen, underscore
+                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+                        name_end++;
+                    } else {
+                        break;
+                    }
+                }
+
+                if (name_end > name_start) {
+                    used_custom_props.insert(val.substr(name_start, name_end - name_start));
+                }
+
+                pos = name_end;
+            }
+        }
+    }
+
+    if (used_custom_props.empty()) {
+        // No var() references at all — all custom props are unused.
+        // Still need to check: do we remove ALL --props or none?
+        // If no var() references exist, all custom props are dead.
+    }
+
+    bool changed = false;
+
+    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+        auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
+
+        std::vector<size_t> to_remove;
+        for (size_t i = 0; i < decls.size(); i++) {
+            const auto& prop = decls[i].property;
+            if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
+                // Extract the name after "--"
+                std::string_view name = prop.substr(2);
+                if (used_custom_props.find(name) == used_custom_props.end()) {
+                    to_remove.push_back(i);
+                }
+            }
+        }
+
+        // Remove in reverse order to preserve indices
+        for (size_t j = to_remove.size(); j > 0; j--) {
+            decls.erase(decls.begin() + to_remove[j - 1]);
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 } // namespace tinyizer
