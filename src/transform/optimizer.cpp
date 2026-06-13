@@ -779,11 +779,18 @@ static size_t inline_single_use_variables(std::string& js) {
             while (p < rhs_end) {
                 if (js[p] == '\\') { p += 2; continue; }
                 if (js[p] == q) {
-                    // Found closing quote — must be end of RHS
-                    if (p + 1 == rhs_end ||
-                        (p + 1 < rhs_end && js[p + 1] == ' ')) {
+                    // Found closing quote — must be the only RHS token
+                    if (p + 1 == rhs_end) {
                         return js.substr(rhs_start, p + 1 - rhs_start);
                     }
+                    // Allow trailing whitespace only
+                    size_t after = p + 1;
+                    while (after < rhs_end && (js[after] == ' ' || js[after] == '\t'))
+                        after++;
+                    if (after == rhs_end)
+                        return js.substr(rhs_start, p + 1 - rhs_start);
+                    // Expression continues beyond this string literal — compound RHS
+                    return "";
                 }
                 p++;
             }
@@ -816,19 +823,26 @@ static size_t inline_single_use_variables(std::string& js) {
     size_t inlined = 0;
     size_t pos = 0;
 
-    while (pos < js.size()) {
-        // Skip to next top-level ident assignment
-        // (simplified: find '=' at depth 0, check left-side ident, right-side literal)
-        // We use a similar scan to strip_orphan_assignments but looking for 2-occurrence vars
+    // Helper: compute brace depth at a given position
+    auto brace_depth_at = [&](size_t at) -> int {
+        int d = 0;
+        for (size_t i = 0; i < at && i < js.size(); i++) {
+            if (inside_string(i)) continue;
+            if (js[i] == '{') d++;
+            else if (js[i] == '}') { if (d > 0) d--; }
+        }
+        return d;
+    };
 
-        // Find next '=' at depth 0 outside strings
+    while (pos < js.size()) {
+        // Find next '=' at depth 0 or 1 outside strings
         size_t eq_pos = std::string::npos;
         int depth = 0;
         for (size_t i = pos; i < js.size(); i++) {
             if (!inside_string(i)) {
                 if (js[i] == '{') depth++;
                 else if (js[i] == '}') { if (depth > 0) depth--; }
-                else if (js[i] == '=' && depth == 0) {
+                else if (js[i] == '=' && depth <= 1) {
                     eq_pos = i;
                     break;
                 }
@@ -851,21 +865,9 @@ static size_t inline_single_use_variables(std::string& js) {
 
         // Check left word boundary
         if (id_start > 0 && is_ident(js[id_start - 1])) { pos = eq_pos + 1; continue; }
-        // Check the ident is at top level (check the start of ident is at depth 0)
-        {
-            int d = 0;
-            for (size_t i = id_start; i > 0; ) {
-                i--;
-                if (!inside_string(i)) {
-                    if (js[i] == '}') d++;
-                    else if (js[i] == '{') {
-                        if (d > 0) d--;
-                        else { d = 1; break; } // opened a brace before closing → inside block
-                    }
-                }
-            }
-            if (d != 0) { pos = eq_pos + 1; continue; } // not top level
-        }
+        // Allow top-level or one level deep (function body)
+        int assignment_depth = brace_depth_at(id_start);
+        if (assignment_depth > 1) { pos = eq_pos + 1; continue; }
 
         // Walk right from '=' to find RHS end (semicolon at depth 0)
         size_t rhs_start = eq_pos + 1;
@@ -907,6 +909,11 @@ static size_t inline_single_use_variables(std::string& js) {
                 i += ident.size();
                 continue;
             }
+
+            // This is a read. Record position if it's the only non-assignment occurrence.
+            // Only count reads at the same or deeper scope as the assignment
+            int read_depth = brace_depth_at(i);
+            if (read_depth < assignment_depth) { i += ident.size(); continue; }
 
             // This is a read. Record position if it's the only non-assignment occurrence.
             count++;
@@ -2146,6 +2153,12 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // identifiers inside ${} use their final short names.
         fold_template_literals_post_rename(opt_js);
 
+        // Re-run inlining: template literal folding may have created
+        // single-use variable assignments like  x=`...${e}`  that can
+        // now be inlined (the template literal is a simple RHS).
+        inline_single_use_variables(opt_js);
+        strip_orphan_assignments(opt_js);
+
         // JS minification
         opt_js = minify_js_text(opt_js);
         // Strip trailing semicolon from end of script — the last
@@ -2451,6 +2464,15 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                                         }
                                     } else {
                                         pos++;
+                                    }
+                                }
+                                // Remove spaces after commas in viewport content:
+                                // "width=device-width, initial-scale=1" -> "width=device-width,initial-scale=1"
+                                for (size_t i = 1; i < opt_buf.size(); ) {
+                                    if (opt_buf[i] == ' ' && opt_buf[i-1] == ',') {
+                                        opt_buf.erase(i, 1);
+                                    } else {
+                                        i++;
                                     }
                                 }
                                 opt_val = opt_buf;
