@@ -739,17 +739,19 @@ std::string minify_css_value(const std::string& value) {
 
         // Remove unnecessary whitespace
         if (is_whitespace(value[i])) {
-            // Don't add space after comma
-            if (!result.empty() && !is_whitespace(result.back()) && result.back() != ',') {
+            // Peek at next non-whitespace character
+            size_t peek = i + 1;
+            while (peek < value.size() && is_whitespace(value[peek])) peek++;
+
+            // Don't add space after comma or before comma / hash / closing paren
+            bool skip_space = (!result.empty() &&
+                (is_whitespace(result.back()) || result.back() == ',')) ||
+                (peek < value.size() && (value[peek] == ',' || value[peek] == '#' || value[peek] == ')'));
+
+            if (!skip_space) {
                 result += ' ';
-                // If the next non-whitespace is a comma, the space we just added is unnecessary
-                size_t peek = i + 1;
-                while (peek < value.size() && is_whitespace(value[peek])) peek++;
-                if (peek < value.size() && value[peek] == ',') {
-                    result.pop_back(); // remove the space since it's before a comma
-                }
             }
-            i++;
+            i = peek;
             continue;
         }
 

@@ -75,7 +75,7 @@ These tools produce a complete, browser-ready HTML page — CSS, JS, and structu
 
 | Tool | test_page.html | test_page2.html | test_page3.html |
 |------|:---:|:---:|:---:|
-| **tinyizer** | **687** | **206** | **136** |
+| **tinyizer** | **686** | **206** | **136** |
 | Pipeline¹ | 839 | 291 | 251 |
 | html-minifier-terser | 1,178 | 370 | 276 |
 | cminify | 1,263 | 433 | 328 |
