@@ -1201,18 +1201,226 @@ static size_t inline_single_call_functions(std::string& js) {
 
         if (call_count != 1) continue;
 
-        // 3. Check the call site is a statement (not part of a larger expression)
-        // Verify it's preceded by ';', '{', '}', '(', or is at start
+        // 3. Determine call context: statement call vs expression call
+        // A statement call is preceded by ';', '{', '}', '(', or is at start
         size_t stmt_start = call_pos;
         while (stmt_start > 0 && js[stmt_start-1] != ';' && js[stmt_start-1] != '{' &&
                js[stmt_start-1] != '}' && js[stmt_start-1] != '(' &&
                js[stmt_start-1] != '\n' && js[stmt_start-1] != '\r')
             stmt_start--;
-        if (stmt_start > 0 && js[stmt_start-1] != ';' && js[stmt_start-1] != '{' &&
-            js[stmt_start-1] != '}' && js[stmt_start-1] != '(' &&
-            stmt_start != 0) {
-            // Not at a statement boundary - skip (e.g., x = foo())
-            continue;
+        bool is_stmt_call = (stmt_start == 0 ||
+                             js[stmt_start-1] == ';' || js[stmt_start-1] == '{' ||
+                             js[stmt_start-1] == '}' || js[stmt_start-1] == '(');
+         // Override: if there's an = between stmt_start and call_pos, it's an expression call
+        for (size_t chk = stmt_start; chk < call_pos; chk++) {
+            if (js[chk] == '=' && (chk == 0 || js[chk-1] != '=' && js[chk-1] != '!' &&
+                js[chk-1] != '<' && js[chk-1] != '>' && js[chk-1] != '+')) {
+                is_stmt_call = false;
+                break;
+            }
+        }
+
+        // For expression calls (e.g., x = foo()), the function must have a return
+        if (!is_stmt_call) {
+            // Check for a return statement in the function body
+            size_t return_pos = std::string::npos;
+            size_t return_scan = 0;
+            int ret_brace_depth = 0;
+            while (return_scan < body.size()) {
+                if (body[return_scan] == '{' && !inside_string(fi.body_start + 1 + return_scan)) ret_brace_depth++;
+                else if (body[return_scan] == '}' && !inside_string(fi.body_start + 1 + return_scan)) ret_brace_depth--;
+                else if (ret_brace_depth == 0 && return_scan + 6 <= body.size() &&
+                         body[return_scan] == 'r' && body[return_scan+1] == 'e' &&
+                         body[return_scan+2] == 't' && body[return_scan+3] == 'u' &&
+                         body[return_scan+4] == 'r' && body[return_scan+5] == 'n') {
+                    // Check word boundaries
+                    bool before_ok = (return_scan == 0 || !isalnum(static_cast<unsigned char>(body[return_scan-1])) &&
+                                      body[return_scan-1] != '_' && body[return_scan-1] != '$');
+                    bool after_ok = (return_scan + 6 >= body.size() ||
+                                     !isalnum(static_cast<unsigned char>(body[return_scan+6])) &&
+                                     body[return_scan+6] != '_' && body[return_scan+6] != '$');
+                    if (before_ok && after_ok) {
+                        return_pos = return_scan;
+                    }
+                }
+                return_scan++;
+            }
+            if (return_pos == std::string::npos) continue; // no return — can't inline expression call
+
+            // Extract return value: everything from after 'return' to closing ';' or end
+            size_t ret_val_start = return_pos + 6;
+            while (ret_val_start < body.size() && (body[ret_val_start] == ' ' || body[ret_val_start] == '\t'))
+                ret_val_start++;
+            size_t ret_val_end = ret_val_start;
+            int semicolon_depth = 0;
+            while (ret_val_end < body.size()) {
+                if (body[ret_val_end] == '(' || body[ret_val_end] == '[' || body[ret_val_end] == '{') semicolon_depth++;
+                else if (body[ret_val_end] == ')' || body[ret_val_end] == ']' || body[ret_val_end] == '}') semicolon_depth--;
+                else if (body[ret_val_end] == ';' && semicolon_depth == 0) break;
+                ret_val_end++;
+            }
+            std::string ret_value = body.substr(ret_val_start, ret_val_end - ret_val_start);
+            // Trim trailing whitespace
+            while (!ret_value.empty() && (ret_value.back() == ' ' || ret_value.back() == '\t'))
+                ret_value.pop_back();
+
+            // Extract prefix: everything in the body before the return statement
+            std::string prefix = body.substr(0, return_pos);
+            // Trim leading/trailing whitespace
+            while (!prefix.empty() && (prefix.front() == ' ' || prefix.front() == '\t' ||
+                   prefix.front() == '\n' || prefix.front() == '\r'))
+                prefix.erase(0, 1);
+            while (!prefix.empty() && (prefix.back() == ' ' || prefix.back() == '\t' ||
+                   prefix.back() == '\n' || prefix.back() == '\r'))
+                prefix.pop_back();
+
+            // Parse parameters and arguments (same as statement path)
+            size_t arg_start = call_pos + fname.size();
+            arg_start = skip_ws(arg_start);
+            if (arg_start >= js.size() || js[arg_start] != '(') continue;
+            int p_depth = 1;
+            size_t close_paren = arg_start + 1;
+            while (close_paren < js.size() && p_depth > 0) {
+                if (js[close_paren] == '(' && !inside_string(close_paren)) p_depth++;
+                else if (js[close_paren] == ')' && !inside_string(close_paren)) p_depth--;
+                close_paren++;
+            }
+            std::string call_args = js.substr(arg_start + 1, close_paren - arg_start - 2);
+
+            std::string params = js.substr(fi.args_start + 1, fi.args_end - fi.args_start - 2);
+
+            std::vector<std::string> param_list;
+            {
+                size_t pp = 0, start_p = 0;
+                while (pp <= params.size()) {
+                    if (pp == params.size() || params[pp] == ',') {
+                        std::string p = params.substr(start_p, pp - start_p);
+                        size_t ts = 0, te = p.size();
+                        while (ts < te && (p[ts] == ' ' || p[ts] == '\t')) ts++;
+                        while (te > ts && (p[te-1] == ' ' || p[te-1] == '\t')) te--;
+                        p = p.substr(ts, te - ts);
+                        size_t eq = p.find('=');
+                        if (eq != std::string::npos) p = p.substr(0, eq);
+                        ts = 0; te = p.size();
+                        while (ts < te && (p[ts] == ' ' || p[ts] == '\t')) ts++;
+                        while (te > ts && (p[te-1] == ' ' || p[te-1] == '\t')) te--;
+                        if (ts < te) param_list.push_back(p.substr(ts, te - ts));
+                        start_p = pp + 1;
+                    }
+                    pp++;
+                }
+            }
+
+            std::vector<std::string> arg_list;
+            {
+                size_t ap = 0, start_a = 0, nest = 0;
+                while (ap <= call_args.size()) {
+                    if (ap == call_args.size() || (call_args[ap] == ',' && nest == 0)) {
+                        std::string a = call_args.substr(start_a, ap - start_a);
+                        size_t ts = 0, te = a.size();
+                        while (ts < te && (a[ts] == ' ' || a[ts] == '\t')) ts++;
+                        while (te > ts && (a[te-1] == ' ' || a[te-1] == '\t')) te--;
+                        if (ts < te) arg_list.push_back(a.substr(ts, te - ts));
+                        start_a = ap + 1;
+                    } else if (call_args[ap] == '(' || call_args[ap] == '[' || call_args[ap] == '{') {
+                        nest++;
+                    } else if (call_args[ap] == ')' || call_args[ap] == ']' || call_args[ap] == '}') {
+                        nest--;
+                    }
+                    ap++;
+                }
+            }
+
+            // Substitute parameters in prefix and return value
+            std::string inlined_prefix = prefix;
+            for (size_t pi = 0; pi < param_list.size() && pi < arg_list.size(); pi++) {
+                const std::string& param = param_list[pi];
+                const std::string& arg = arg_list[pi];
+                size_t rp = 0;
+                while (rp < inlined_prefix.size()) {
+                    size_t found = inlined_prefix.find(param, rp);
+                    if (found == std::string::npos) break;
+                    bool before_ok = (found == 0 || !isalnum(static_cast<unsigned char>(inlined_prefix[found-1])) &&
+                                      inlined_prefix[found-1] != '_' && inlined_prefix[found-1] != '$');
+                    bool after_ok = (found + param.size() >= inlined_prefix.size() ||
+                                     (!isalnum(static_cast<unsigned char>(inlined_prefix[found + param.size()])) &&
+                                      inlined_prefix[found + param.size()] != '_' &&
+                                      inlined_prefix[found + param.size()] != '$'));
+                    if (before_ok && after_ok) {
+                        inlined_prefix.replace(found, param.size(), arg);
+                        rp = found + arg.size();
+                    } else {
+                        rp = found + 1;
+                    }
+                }
+            }
+
+            std::string inlined_ret = ret_value;
+            for (size_t pi = 0; pi < param_list.size() && pi < arg_list.size(); pi++) {
+                const std::string& param = param_list[pi];
+                const std::string& arg = arg_list[pi];
+                size_t rp = 0;
+                while (rp < inlined_ret.size()) {
+                    size_t found = inlined_ret.find(param, rp);
+                    if (found == std::string::npos) break;
+                    bool before_ok = (found == 0 || !isalnum(static_cast<unsigned char>(inlined_ret[found-1])) &&
+                                      inlined_ret[found-1] != '_' && inlined_ret[found-1] != '$');
+                    bool after_ok = (found + param.size() >= inlined_ret.size() ||
+                                     (!isalnum(static_cast<unsigned char>(inlined_ret[found + param.size()])) &&
+                                      inlined_ret[found + param.size()] != '_' &&
+                                      inlined_ret[found + param.size()] != '$'));
+                    if (before_ok && after_ok) {
+                        inlined_ret.replace(found, param.size(), arg);
+                        rp = found + arg.size();
+                    } else {
+                        rp = found + 1;
+                    }
+                }
+            }
+
+            // Find the enclosing statement start (for prefix insertion)
+            size_t stmt_boundary = call_pos;
+            while (stmt_boundary > 0 && js[stmt_boundary - 1] != ';' &&
+                   js[stmt_boundary - 1] != '{' && js[stmt_boundary - 1] != '}')
+                stmt_boundary--;
+            if (stmt_boundary > 0 && js[stmt_boundary - 1] == ';')
+                stmt_boundary--;  // also consume the ; for clean insertion
+
+            // Erase function declaration first (it's before the call)
+            size_t func_erase_start = fi.start;
+            while (func_erase_start > 0 &&
+                   (js[func_erase_start - 1] == ' ' || js[func_erase_start - 1] == '\t' ||
+                    js[func_erase_start - 1] == '\n' || js[func_erase_start - 1] == '\r'))
+                func_erase_start--;
+            size_t func_erase_end = fi.end;
+            while (func_erase_end < js.size() &&
+                   (js[func_erase_end] == ' ' || js[func_erase_end] == '\t' ||
+                    js[func_erase_end] == '\n' || js[func_erase_end] == '\r'))
+                func_erase_end++;
+            size_t func_erase_len = func_erase_end - func_erase_start;
+            js.erase(func_erase_start, func_erase_len);
+
+            // Shift positions after function erase
+            size_t shifted_call_pos = call_pos - func_erase_len;
+            size_t shifted_close_paren = close_paren - func_erase_len;
+            size_t shifted_stmt = stmt_boundary - func_erase_len;
+
+            // Insert prefix before the statement containing the call
+            if (!inlined_prefix.empty()) {
+                std::string prefix_stmt = inlined_prefix + ";";
+                js.insert(shifted_stmt, prefix_stmt);
+                size_t insert_len = prefix_stmt.size();
+                shifted_call_pos += insert_len;
+                shifted_close_paren += insert_len;
+            }
+
+            // Replace call f(...) with return value
+            size_t call_len = shifted_close_paren - shifted_call_pos;
+            js.replace(shifted_call_pos, call_len, inlined_ret);
+
+            inlined++;
+            any_inlined = true;
+            break; // re-scan
         }
 
         // Find the end of the call expression (matching close paren)
