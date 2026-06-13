@@ -654,24 +654,27 @@ std::unique_ptr<JSNode> JSParser::parse_primary() {
 
     if (c == '`') {
         size_t tl_start = tok_->pos();
-        // Template literal — consume until closing `
-        tok_->advance();
+        auto tl_node = std::make_unique<JSNode>(JSNodeType::TEMPLATE_LITERAL);
+        tok_->advance(); // skip opening backtick
         while (!tok_->eof() && tok_->peek() != '`') {
-            if (tok_->peek() == '\\') tok_->advance();
-            if (tok_->peek() == '$' && tok_->peek_ahead(1) == '{') {
-                tok_->skip(2); // ${
-                int depth = 1;
-                while (!tok_->eof() && depth > 0) {
-                    if (tok_->peek() == '{') depth++;
-                    if (tok_->peek() == '}') depth--;
-                    tok_->advance();
-                }
-                continue;
+            if (tok_->peek() == '\\') {
+                tok_->advance(); // backslash
+                if (!tok_->eof()) tok_->advance(); // escaped char
+            } else if (tok_->peek() == '$' && tok_->peek_ahead(1) == '{') {
+                tok_->skip(2); // skip ${
+                // Parse the expression inside — this registers variable references
+                // so that passes like dead-code elimination see identifiers used
+                // in template literal expressions.
+                auto expr = parse_expression(0);
+                if (expr) tl_node->children.push_back(std::move(expr));
+                skip_comments_and_whitespace();
+                if (!tok_->eof() && tok_->peek() == '}') tok_->advance();
+            } else {
+                tok_->advance();
             }
-            tok_->advance();
         }
         tok_->match('`');
-        return stamp_node(std::make_unique<JSNode>(JSNodeType::TEMPLATE_LITERAL), tl_start);
+        return stamp_node(std::move(tl_node), tl_start);
     }
 
     // Keywords: true, false, null, undefined, this, new

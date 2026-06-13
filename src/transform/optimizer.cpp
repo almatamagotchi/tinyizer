@@ -2418,10 +2418,10 @@ static void collect_string_literal_ranges(JSNode* node,
 // Scan the current opt_js text for string/template literal positions.
 // Used after dead-code erasure when AST positions are stale.
 static void scan_string_ranges_in_text(const std::string& text,
-                                       std::vector<std::pair<size_t, size_t>>& ranges) {
+                                        std::vector<std::pair<size_t, size_t>>& ranges) {
     for (size_t i = 0; i < text.size(); ++i) {
         char c = text[i];
-        if (c == '"' || c == '\'' || c == '`') {
+        if (c == '"' || c == '\'') {
             char quote = c;
             size_t start = i;
             ++i;
@@ -2432,6 +2432,45 @@ static void scan_string_ranges_in_text(const std::string& text,
             }
             if (i <= text.size()) ranges.emplace_back(start, i);
             if (i >= text.size()) break;
+            --i; // for loop will ++i
+        } else if (c == '`') {
+            // Template literal: split string ranges to exclude ${...} expressions.
+            // This way passes that use inside_string() can still see identifiers
+            // used inside template expressions (e.g. `var x=1` won't be stripped
+            // when x is only referenced inside `${x}`).
+            size_t seg_start = i;
+            ++i;
+            while (i < text.size()) {
+                if (text[i] == '\\' && i + 1 < text.size()) { i += 2; continue; }
+                if (text[i] == '`') {
+                    // Closing backtick — emit final string segment (including backticks)
+                    if (i > seg_start) ranges.emplace_back(seg_start, i + 1);
+                    ++i;
+                    break;
+                }
+                if (text[i] == '$' && i + 1 < text.size() && text[i + 1] == '{') {
+                    // Template expression start — emit segment before ${
+                    if (i > seg_start) ranges.emplace_back(seg_start, i);
+                    // Skip to matching '}' with brace-depth tracking
+                    int brace_depth = 1;
+                    i += 2; // skip past "${
+                    while (i < text.size() && brace_depth > 0) {
+                        if (text[i] == '\\' && i + 1 < text.size()) { i += 2; continue; }
+                        if (text[i] == '{') brace_depth++;
+                        else if (text[i] == '}') brace_depth--;
+                        i++;
+                    }
+                    seg_start = i; // next string segment starts after '}'
+                    --i; // outer while will ++i
+                    continue;
+                }
+                ++i;
+            }
+            if (i >= text.size()) {
+                // Unterminated template literal — emit whatever remains
+                if (i > seg_start) ranges.emplace_back(seg_start, i);
+                break;
+            }
             --i; // for loop will ++i
         }
     }
