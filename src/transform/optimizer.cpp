@@ -985,6 +985,431 @@ static size_t inline_single_use_variables(std::string& js) {
     return inlined;
 }
 
+// ---- Single-call function inlining ----
+// Finds top-level function declarations called exactly once as a statement
+// and inlines the body in place of the call, removing the declaration.
+// e.g., function d(c){alert(c)}d("hi") → alert("hi")
+// Safety: skips functions using `arguments`, `this`, or recursive calls.
+static size_t inline_single_call_functions(std::string& js) {
+
+
+    // Scan string/template/comment ranges for safe identifier detection
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+    auto inside_string = [&](size_t pos) -> bool {
+        for (auto& [s, e] : string_ranges) {
+            if (pos >= s && pos < e) return true;
+        }
+        return false;
+    };
+
+    // Helper: skip whitespace forward
+    auto skip_ws = [&](size_t pos) -> size_t {
+        while (pos < js.size() && (js[pos] == ' ' || js[pos] == '\t' ||
+               js[pos] == '\n' || js[pos] == '\r'))
+            pos++;
+        return pos;
+    };
+
+    // Keep rescanning until no more functions are inlined (because positions
+    // shift when a function is erased, invalidating stored positions for
+    // subsequent functions in the same scan).
+    size_t inlined = 0;
+    bool any_inlined = false;
+    do {
+        any_inlined = false;
+        string_ranges.clear();
+        scan_string_ranges_in_text(js, string_ranges);
+
+        // (Re-)find all function declarations at depth 0
+        struct FuncInfo {
+            size_t start;       // position of 'function'
+            size_t name_start;  // start of name
+            size_t name_len;    // length of name
+            size_t args_start;  // position of '('
+            size_t args_end;    // position after ')'
+            size_t body_start;  // position after '{'
+            size_t body_end;    // position of closing '}'
+            size_t end;         // position after '}'
+        };
+        std::vector<FuncInfo> funcs;
+        size_t pos = 0;
+        while (pos < js.size()) {
+            // Look for 'function' keyword
+            if (pos >= js.size() - 8) break;
+            if (js[pos] == 'f' && js[pos+1] == 'u' && js[pos+2] == 'n' &&
+                js[pos+3] == 'c' && js[pos+4] == 't' && js[pos+5] == 'i' &&
+                js[pos+6] == 'o' && js[pos+7] == 'n') {
+
+                size_t kw_end = pos + 8;
+                // Must be preceded by whitespace, ';', '}', or start-of-string
+                if (pos > 0 && js[pos-1] != ' ' && js[pos-1] != '\t' &&
+                    js[pos-1] != '\n' && js[pos-1] != '\r' &&
+                    js[pos-1] != ';' && js[pos-1] != '}' && js[pos-1] != '{') {
+                    pos++;
+                    continue;
+                }
+                // Must be followed by whitespace
+                if (kw_end >= js.size() || (js[kw_end] != ' ' && js[kw_end] != '\t' &&
+                    js[kw_end] != '\n')) {
+                    pos = kw_end;
+                    continue;
+                }
+
+                size_t name_start = skip_ws(kw_end);
+                if (name_start >= js.size() || !isalnum(static_cast<unsigned char>(js[name_start])) || js[name_start] == '$') {
+                    break;
+                }
+                // Read function name
+                size_t name_end = name_start;
+                while (name_end < js.size() && (isalnum(static_cast<unsigned char>(js[name_end])) || js[name_end] == '_' || js[name_end] == '$'))
+                    name_end++;
+
+                if (name_end <= name_start) { pos = name_start + 1; continue; }
+
+                std::string fname = js.substr(name_start, name_end - name_start);
+
+                // Look for '('
+                size_t args_start = skip_ws(name_end);
+                if (args_start >= js.size() || js[args_start] != '(') {
+                    pos = name_end;
+                    continue;
+                }
+
+                // Find matching ')'
+                int paren_depth = 1;
+                size_t args_end = args_start + 1;
+                while (args_end < js.size() && paren_depth > 0) {
+                    if (js[args_end] == '(' && !inside_string(args_end)) paren_depth++;
+                    else if (js[args_end] == ')' && !inside_string(args_end)) paren_depth--;
+                    args_end++;
+                }
+                if (paren_depth != 0) { pos = args_start + 1; continue; }
+
+                // Look for '{'
+                size_t body_start = skip_ws(args_end);
+                if (body_start >= js.size() || js[body_start] != '{') {
+                    pos = args_end;
+                    continue;
+                }
+
+                // Find matching '}'
+                int brace_depth = 1;
+                size_t body_end_p = body_start + 1;
+                while (body_end_p < js.size() && brace_depth > 0) {
+                    if (js[body_end_p] == '{' && !inside_string(body_end_p)) brace_depth++;
+                    else if (js[body_end_p] == '}' && !inside_string(body_end_p)) brace_depth--;
+                    body_end_p++;
+                }
+                if (brace_depth != 0) { pos = body_start + 1; continue; }
+                size_t body_end = body_end_p - 1; // points to '}'
+                size_t end = body_end_p;
+
+                // Only top-level functions (not nested)
+                FuncInfo fi = {pos, name_start, name_end - name_start,
+                               args_start, args_end,
+                               body_start, body_end, end};
+                funcs.push_back(fi);
+                pos = end;
+            } else {
+                pos++;
+            }
+        }
+
+        if (funcs.empty()) break;
+
+    // For each function, count call sites and check safety
+    for (auto& fi : funcs) {
+        std::string fname = js.substr(fi.name_start, fi.name_len);
+
+        // Safety checks
+        // 0. Verify positions are still valid (string may have been modified
+        //    in a previous iteration of the do-while loop)
+        if (fi.name_start >= js.size() || fi.name_start + fi.name_len > js.size() ||
+            fi.body_start + 1 >= js.size() || fi.body_end > js.size() ||
+            fi.body_end <= fi.body_start) {
+            continue;
+        }
+
+        // 1. Function must not use 'arguments' or 'this'
+        std::string body = js.substr(fi.body_start + 1, fi.body_end - fi.body_start - 1);
+        {
+            bool has_arguments = false;
+            size_t bp = 0;
+            while (bp < body.size() && !has_arguments) {
+                if (bp + 9 <= body.size() && body[bp] == 'a' &&
+                    strncmp(&body[bp], "arguments", 9) == 0) {
+                    // Check word boundary
+                    size_t after = bp + 9;
+                    if (after >= body.size() || !isalnum(static_cast<unsigned char>(body[after])) && body[after] != '_' && body[after] != '$')
+                        has_arguments = true;
+                }
+                bp++;
+            }
+            if (has_arguments) continue;
+
+            bool has_this = false;
+            bp = 0;
+            while (bp < body.size() && !has_this) {
+                if (bp + 4 <= body.size() && body[bp] == 't' &&
+                    strncmp(&body[bp], "this", 4) == 0) {
+                    size_t before = bp > 0 ? bp - 1 : 0;
+                    size_t after = bp + 4;
+                    if ((bp == 0 || !isalnum(static_cast<unsigned char>(body[before])) && body[before] != '_' && body[before] != '$') &&
+                        (after >= body.size() || !isalnum(static_cast<unsigned char>(body[after])) && body[after] != '_' && body[after] != '$'))
+                        has_this = true;
+                }
+                bp++;
+            }
+            if (has_this) continue;
+        }
+
+        // 2. Count call sites: find `fname(` occurrences outside the function itself
+        int call_count = 0;
+        size_t call_pos = 0;
+        size_t scan_pos = 0;
+        while (scan_pos < js.size()) {
+            size_t found = js.find(fname, scan_pos);
+            if (found == std::string::npos) break;
+            // Must be a word boundary before
+            if (found > 0 && (isalnum(static_cast<unsigned char>(js[found-1])) ||
+                              js[found-1] == '_' || js[found-1] == '$')) {
+                scan_pos = found + 1;
+                continue;
+            }
+            // Must be followed by '('
+            size_t after = found + fname.size();
+            after = skip_ws(after);
+            if (after >= js.size() || js[after] != '(') {
+                scan_pos = found + 1;
+                continue;
+            }
+            // Skip the function declaration itself (name is within its body range)
+            if (found >= fi.start && found < fi.end) {
+                scan_pos = found + 1;
+                continue;
+            }
+            // Don't count inside string
+            if (inside_string(found)) {
+                scan_pos = found + 1;
+                continue;
+            }
+            call_count++;
+            call_pos = found;
+            scan_pos = found + 1;
+        }
+
+        if (call_count != 1) continue;
+
+        // 3. Check the call site is a statement (not part of a larger expression)
+        // Verify it's preceded by ';', '{', '}', '(', or is at start
+        size_t stmt_start = call_pos;
+        while (stmt_start > 0 && js[stmt_start-1] != ';' && js[stmt_start-1] != '{' &&
+               js[stmt_start-1] != '}' && js[stmt_start-1] != '(' &&
+               js[stmt_start-1] != '\n' && js[stmt_start-1] != '\r')
+            stmt_start--;
+        if (stmt_start > 0 && js[stmt_start-1] != ';' && js[stmt_start-1] != '{' &&
+            js[stmt_start-1] != '}' && js[stmt_start-1] != '(' &&
+            stmt_start != 0) {
+            // Not at a statement boundary - skip (e.g., x = foo())
+            continue;
+        }
+
+        // Find the end of the call expression (matching close paren)
+        size_t arg_start = call_pos + fname.size();
+        arg_start = skip_ws(arg_start);
+        if (arg_start >= js.size() || js[arg_start] != '(') continue;
+        int p_depth = 1;
+        size_t close_paren = arg_start + 1;
+        while (close_paren < js.size() && p_depth > 0) {
+            if (js[close_paren] == '(' && !inside_string(close_paren)) p_depth++;
+            else if (js[close_paren] == ')' && !inside_string(close_paren)) p_depth--;
+            close_paren++;
+        }
+
+        // Extract call arguments as a single string between '(' and ')'
+        std::string call_args = js.substr(arg_start + 1, close_paren - arg_start - 2);
+
+        // Extract function parameters
+        std::string params = js.substr(fi.args_start + 1, fi.args_end - fi.args_start - 2);
+
+        // Parse parameters (comma-separated, handling default values)
+        std::vector<std::string> param_list;
+        {
+            size_t pp = 0;
+            size_t start_p = 0;
+            while (pp <= params.size()) {
+                if (pp == params.size() || params[pp] == ',') {
+                    std::string p = params.substr(start_p, pp - start_p);
+                    // Trim whitespace
+                    size_t ts = 0, te = p.size();
+                    while (ts < te && (p[ts] == ' ' || p[ts] == '\t')) ts++;
+                    while (te > ts && (p[te-1] == ' ' || p[te-1] == '\t')) te--;
+                    p = p.substr(ts, te - ts);
+                    // Skip default values: a=b → just 'a'
+                    size_t eq = p.find('=');
+                    if (eq != std::string::npos) p = p.substr(0, eq);
+                    // Trim again
+                    ts = 0; te = p.size();
+                    while (ts < te && (p[ts] == ' ' || p[ts] == '\t')) ts++;
+                    while (te > ts && (p[te-1] == ' ' || p[te-1] == '\t')) te--;
+                    if (ts < te) param_list.push_back(p.substr(ts, te - ts));
+                    start_p = pp + 1;
+                }
+                pp++;
+            }
+        }
+
+        // Parse arguments (comma-separated, but respecting nested parens/braces)
+        std::vector<std::string> arg_list;
+        {
+            size_t ap = 0;
+            size_t start_a = 0;
+            int nest = 0;
+            while (ap <= call_args.size()) {
+                if (ap == call_args.size() || (call_args[ap] == ',' && nest == 0)) {
+                    std::string a = call_args.substr(start_a, ap - start_a);
+                    // Trim whitespace
+                    size_t ts = 0, te = a.size();
+                    while (ts < te && (a[ts] == ' ' || a[ts] == '\t')) ts++;
+                    while (te > ts && (a[te-1] == ' ' || a[te-1] == '\t')) te--;
+                    if (ts < te) arg_list.push_back(a.substr(ts, te - ts));
+                    start_a = ap + 1;
+                } else if (call_args[ap] == '(' || call_args[ap] == '[' || call_args[ap] == '{') {
+                    nest++;
+                } else if (call_args[ap] == ')' || call_args[ap] == ']' || call_args[ap] == '}') {
+                    nest--;
+                }
+                ap++;
+            }
+        }
+
+        // Build the inlined body: replace parameter names with argument expressions
+        std::string inlined_body = body;
+        for (size_t pi = 0; pi < param_list.size() && pi < arg_list.size(); pi++) {
+            const std::string& param = param_list[pi];
+            const std::string& arg = arg_list[pi];
+
+            // Simple string replacement, respecting word boundaries
+            size_t rp = 0;
+            while (rp < inlined_body.size()) {
+                size_t found = inlined_body.find(param, rp);
+                if (found == std::string::npos) break;
+
+                // Check word boundary
+                bool before_ok = (found == 0 || !isalnum(static_cast<unsigned char>(inlined_body[found-1])) &&
+                                  inlined_body[found-1] != '_' && inlined_body[found-1] != '$');
+                bool after_ok = (found + param.size() >= inlined_body.size() ||
+                                 (!isalnum(static_cast<unsigned char>(inlined_body[found + param.size()])) &&
+                                  inlined_body[found + param.size()] != '_' &&
+                                  inlined_body[found + param.size()] != '$'));
+
+                if (before_ok && after_ok) {
+                    inlined_body.replace(found, param.size(), arg);
+                    rp = found + arg.size();
+                } else {
+                    rp = found + 1;
+                }
+            }
+        }
+
+        // Trim whitespace from inlined body
+        while (!inlined_body.empty() && (inlined_body.front() == ' ' || inlined_body.front() == '\t' ||
+               inlined_body.front() == '\n' || inlined_body.front() == '\r'))
+            inlined_body.erase(0, 1);
+        while (!inlined_body.empty() && (inlined_body.back() == ' ' || inlined_body.back() == '\t' ||
+               inlined_body.back() == '\n' || inlined_body.back() == '\r' ||
+               inlined_body.back() == ';'))
+            inlined_body.pop_back();
+
+        if (inlined_body.empty()) {
+            // Body became empty - replace the call with nothing
+            // Find the semicolon after the call and remove it too
+            size_t erase_end = close_paren;
+            while (erase_end < js.size() && js[erase_end] != ';' &&
+                   js[erase_end] != '\n' && js[erase_end] != '\r')
+                erase_end++;
+            if (erase_end < js.size() && js[erase_end] == ';') erase_end++;
+            js.erase(call_pos, erase_end - call_pos);
+
+            // Also remove the function declaration
+            size_t func_erase_end = fi.end;
+            // Include trailing whitespace/newline
+            while (func_erase_end < js.size() && (js[func_erase_end] == ' ' || js[func_erase_end] == '\n' || js[func_erase_end] == '\r'))
+                func_erase_end++;
+            // Also remove leading whitespace/semicolons before function
+            size_t func_erase_start = fi.start;
+            while (func_erase_start > 0 && (js[func_erase_start-1] == ' ' || js[func_erase_start-1] == '\n' || js[func_erase_start-1] == '\r'))
+                func_erase_start--;
+            js.erase(func_erase_start, func_erase_end - func_erase_start);
+            inlined++;
+            any_inlined = true;
+            break; // positions invalidated, re-scan
+        } else {
+            // Erase function declaration FIRST (it's before the call since this is a
+            // top-level function called after definition).  Then replace the call
+            // (shifted by the erase length) with the inlined body.
+
+            // compute erase range for function declaration
+            size_t func_erase_start = fi.start;
+            while (func_erase_start > 0 &&
+                   (js[func_erase_start - 1] == ' ' || js[func_erase_start - 1] == '\t' ||
+                    js[func_erase_start - 1] == '\n' || js[func_erase_start - 1] == '\r'))
+                func_erase_start--;
+            size_t func_erase_end = fi.end;
+            while (func_erase_end < js.size() &&
+                   (js[func_erase_end] == ' ' || js[func_erase_end] == '\t' ||
+                    js[func_erase_end] == '\n' || js[func_erase_end] == '\r'))
+                func_erase_end++;
+
+             size_t func_erase_len = func_erase_end - func_erase_start;
+
+             // erase function declaration
+             js.erase(func_erase_start, func_erase_len);
+
+            // call_pos has shifted down by func_erase_len (assuming call is after function)
+            // but only if func_erase_start < call_pos
+            size_t shifted_call_pos;
+            if (func_erase_start < call_pos) {
+                if (call_pos >= func_erase_end)
+                    shifted_call_pos = call_pos - func_erase_len;
+                else
+                    shifted_call_pos = func_erase_start; // call was inside erased range (shouldn't happen)
+            } else {
+                shifted_call_pos = call_pos;
+            }
+
+            // recompute close_paren position (also shifted)
+            size_t shifted_close_paren;
+            if (close_paren >= func_erase_end)
+                shifted_close_paren = close_paren - func_erase_len;
+            else
+                shifted_close_paren = func_erase_start;
+
+            // compute erase range for the call (including trailing semicolon)
+            size_t call_erase_start = shifted_call_pos;
+            size_t call_erase_end = shifted_close_paren;
+            while (call_erase_end < js.size() &&
+                   (js[call_erase_end] == ' ' || js[call_erase_end] == '\t'))
+                call_erase_end++;
+            if (call_erase_end < js.size() && js[call_erase_end] == ';')
+                call_erase_end++;
+
+             js.replace(call_erase_start, call_erase_end - call_erase_start,
+                        inlined_body + ";");
+            inlined++;
+            any_inlined = true;
+            break; // positions invalidated, re-scan
+
+            // Re-scan string ranges since positions shifted
+            // (will be redone at top of loop)
+        }
+    }
+    } while (any_inlined);
+
+    return inlined;
+}
+
 // ---- Dead function detection after console stripping ----
 
 // ---- Dead function detection after console stripping ----
@@ -1995,6 +2420,11 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // Re-run orphan removal: inlining may have left the declaration orphaned
         // (but inline removes it directly, so this is a safety net for edge cases)
         strip_orphan_assignments(opt_js);
+        // Inline single-call function declarations: if a top-level function
+        // is called exactly once as a statement, replace the call with the
+        // body and remove the declaration.
+        inline_single_call_functions(opt_js);
+        strip_orphan_assignments(opt_js);
         // Re-run function elimination: inlining can orphan previously-referenced functions
         strip_empty_functions(opt_js);
         strip_unreferenced_functions(opt_js);
@@ -2157,6 +2587,11 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         // single-use variable assignments like  x=`...${e}`  that can
         // now be inlined (the template literal is a simple RHS).
         inline_single_use_variables(opt_js);
+        strip_orphan_assignments(opt_js);
+
+        // Run single-call function inlining again after renaming
+        // (function names may have been shortened)
+        inline_single_call_functions(opt_js);
         strip_orphan_assignments(opt_js);
 
         // JS minification
