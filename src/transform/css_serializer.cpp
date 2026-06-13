@@ -207,6 +207,16 @@ std::string tinyizer::minify_js_text(const std::string& js) {
     bool need_space = false;
     bool after_word = false;
 
+    // Coalesce consecutive appends: track the start of a run of chars
+    // that can be bulk-copied. Used for strings, templates, and code runs.
+    auto flush_run = [&](size_t& run_start, size_t i) {
+        if (run_start < i) {
+            out.append(&js[run_start], i - run_start);
+        }
+        run_start = i + 1;
+    };
+    size_t run_start = 0;
+
     for (size_t i = 0; i < js.size(); i++) {
         char c = js[i];
         char next = (i + 1 < js.size()) ? js[i + 1] : 0;
@@ -215,21 +225,57 @@ std::string tinyizer::minify_js_text(const std::string& js) {
         if (in_block_comment) { if (c == '*' && next == '/') { in_block_comment = false; i++; } continue; }
 
         if (in_string) {
-            if (c == '\\') { out += c; out += next; i++; continue; }
-            if (c == string_char) in_string = false;
-            out += c; after_word = false; continue;
+            if (c == '\\') {
+                flush_run(run_start, i);
+                out += c; out += next; i++;
+                run_start = i + 1;
+                continue;
+            }
+            if (c == string_char) {
+                flush_run(run_start, i);
+                out += c;
+                run_start = i + 1;
+                in_string = false;
+                after_word = false;
+                continue;
+            }
+            continue;
         }
         if (in_template) {
-            if (c == '\\') { out += c; out += next; i++; continue; }
-            if (c == '`') in_template = false;
-            out += c; after_word = false; continue;
+            if (c == '\\') {
+                flush_run(run_start, i);
+                out += c; out += next; i++;
+                run_start = i + 1;
+                continue;
+            }
+            if (c == '`') {
+                flush_run(run_start, i);
+                out += c;
+                run_start = i + 1;
+                in_template = false;
+                after_word = false;
+                continue;
+            }
+            continue;
         }
 
-        if (c == '"' || c == '\'') { in_string = true; string_char = c; out += c; need_space = false; after_word = false; continue; }
-        if (c == '`') { in_template = true; out += c; need_space = false; after_word = false; continue; }
+        if (c == '"' || c == '\'') {
+            flush_run(run_start, i);
+            in_string = true; string_char = c;
+            out += c; need_space = false; after_word = false;
+            run_start = i + 1;
+            continue;
+        }
+        if (c == '`') {
+            flush_run(run_start, i);
+            in_template = true;
+            out += c; need_space = false; after_word = false;
+            run_start = i + 1;
+            continue;
+        }
 
-        if (c == '/' && next == '/') { in_line_comment = true; i++; continue; }
-        if (c == '/' && next == '*') { in_block_comment = true; i++; continue; }
+        if (c == '/' && next == '/') { flush_run(run_start, i); in_line_comment = true; i++; run_start = i + 1; continue; }
+        if (c == '/' && next == '*') { flush_run(run_start, i); in_block_comment = true; i++; run_start = i + 1; continue; }
 
         // Regex literals: skip space before / when in expression context
         if (c == '/' && after_word && !out.empty()) {
@@ -237,22 +283,30 @@ std::string tinyizer::minify_js_text(const std::string& js) {
             if (prev == '=' || prev == '(' || prev == '!' || prev == '&' ||
                 prev == '|' || prev == '{' || prev == ';' || prev == ':' ||
                 prev == '[' || prev == ',' || prev == '?' || prev == '~' || prev == '\n') {
-                out += c; after_word = false; need_space = false; continue;
+                flush_run(run_start, i);
+                out += c; after_word = false; need_space = false;
+                run_start = i + 1;
+                continue;
             }
         }
 
         if (std::isspace(static_cast<unsigned char>(c))) {
+            flush_run(run_start, i);
             if (after_word) need_space = true;
+            run_start = i + 1;
             continue;
         }
 
         if (need_space && after_word && std::isalnum(static_cast<unsigned char>(c))) {
+            flush_run(run_start, i);
             out += ' ';
+            run_start = i;
         }
         need_space = false;
-        out += c;
         after_word = std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '$';
     }
+    // Flush any remaining run
+    flush_run(run_start, js.size());
     // Post-processing: remove unnecessary semicolons before closing braces.
     // Safe in all JS contexts: ';}' is an empty statement followed by block end,
     // and the empty statement contributes nothing. Preserves strings/templates/regexes.
@@ -263,26 +317,51 @@ std::string tinyizer::minify_js_text(const std::string& js) {
         char str_char = 0;
         bool in_tmpl = false;
         bool in_regex = false;
+
+        auto c_flush = [&](size_t& c_run, size_t i) {
+            if (c_run < i) cleaned.append(&out[c_run], i - c_run);
+            c_run = i + 1;
+        };
+        size_t c_run = 0;
+
         for (size_t i = 0; i < out.size(); i++) {
             char c = out[i];
             char n = (i + 1 < out.size()) ? out[i + 1] : 0;
             if (in_str) {
-                if (c == '\\') { cleaned += c; cleaned += n; i++; continue; }
-                if (c == str_char) in_str = false;
-                cleaned += c; continue;
+                if (c == '\\') { c_flush(c_run, i); cleaned += c; cleaned += n; i++; c_run = i + 1; continue; }
+                if (c == str_char) {
+                    c_flush(c_run, i);
+                    cleaned += c;
+                    c_run = i + 1;
+                    in_str = false;
+                    continue;
+                }
+                continue;
             }
             if (in_tmpl) {
-                if (c == '\\') { cleaned += c; cleaned += n; i++; continue; }
-                if (c == '`') in_tmpl = false;
-                cleaned += c; continue;
+                if (c == '\\') { c_flush(c_run, i); cleaned += c; cleaned += n; i++; c_run = i + 1; continue; }
+                if (c == '`') {
+                    c_flush(c_run, i);
+                    cleaned += c;
+                    c_run = i + 1;
+                    in_tmpl = false;
+                    continue;
+                }
+                continue;
             }
             if (in_regex) {
-                if (c == '\\') { cleaned += c; cleaned += n; i++; continue; }
-                if (c == '/') in_regex = false;
-                cleaned += c; continue;
+                if (c == '\\') { c_flush(c_run, i); cleaned += c; cleaned += n; i++; c_run = i + 1; continue; }
+                if (c == '/') {
+                    c_flush(c_run, i);
+                    cleaned += c;
+                    c_run = i + 1;
+                    in_regex = false;
+                    continue;
+                }
+                continue;
             }
-            if (c == '"' || c == '\'') { in_str = true; str_char = c; cleaned += c; continue; }
-            if (c == '`') { in_tmpl = true; cleaned += c; continue; }
+            if (c == '"' || c == '\'') { c_flush(c_run, i); in_str = true; str_char = c; cleaned += c; c_run = i + 1; continue; }
+            if (c == '`') { c_flush(c_run, i); in_tmpl = true; cleaned += c; c_run = i + 1; continue; }
             // Detect regex: / followed by non-whitespace in expression context
             if (c == '/' && n != '/' && n != '*' && n != ' ' && n != '\t' && n != '\n') {
                 if (!cleaned.empty() && (cleaned.back() == '(' || cleaned.back() == '=' ||
@@ -290,15 +369,17 @@ std::string tinyizer::minify_js_text(const std::string& js) {
                     cleaned.back() == '{' || cleaned.back() == ';' || cleaned.back() == ':' ||
                     cleaned.back() == '[' || cleaned.back() == ',' || cleaned.back() == '?' ||
                     cleaned.back() == '~')) {
+                    c_flush(c_run, i);
                     in_regex = true;
                     cleaned += c;
+                    c_run = i + 1;
                     continue;
                 }
             }
             // Remove semicolon before '}'
-            if (c == ';' && n == '}') continue;
-            cleaned += c;
+            if (c == ';' && n == '}') { c_flush(c_run, i); c_run = i + 1; continue; }
         }
+        c_flush(c_run, out.size());
         out = std::move(cleaned);
     }
     return out;
