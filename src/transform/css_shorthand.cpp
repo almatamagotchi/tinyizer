@@ -770,10 +770,11 @@ std::string minify_css_value(const std::string& value) {
             size_t peek = i + 1;
             while (peek < value.size() && is_whitespace(value[peek])) peek++;
 
-            // Don't add space after comma or before comma / hash / closing paren
+            // Don't add space after comma or before comma / hash / closing paren / pct / fn paren
             bool skip_space = (!result.empty() &&
                 (is_whitespace(result.back()) || result.back() == ',')) ||
-                (peek < value.size() && (value[peek] == ',' || value[peek] == '#' || value[peek] == ')'));
+                (peek < value.size() && (value[peek] == ',' || value[peek] == '#' ||
+                 value[peek] == ')' || value[peek] == '%' || value[peek] == '('));
 
             if (!skip_space) {
                 result += ' ';
