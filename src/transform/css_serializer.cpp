@@ -138,32 +138,47 @@ std::string serialize_css(const std::vector<CSSRule>& rules) {
             if (!first_sel) out += ',';
             first_sel = false;
 
+            bool prev_was_universal = false;
             for (const auto& part : sel) {
                 switch (part.type) {
                 case CSSRule::SelectorPart::Type::ELEMENT:
+                    if (prev_was_universal) { prev_was_universal = false; }
                     out += part.value;
                     break;
                 case CSSRule::SelectorPart::Type::CLASS:
-                    out += '.';
-                    out += part.value;
-                    break;
                 case CSSRule::SelectorPart::Type::ID:
-                    out += '#';
-                    out += part.value;
-                    break;
                 case CSSRule::SelectorPart::Type::ATTR:
-                    out += '[';
-                    out += part.value;
-                    out += ']';
-                    break;
                 case CSSRule::SelectorPart::Type::PSEUDO:
-                    out += part.value;
+                    // If the previous part was a universal selector (*),
+                    // skip emitting the '*' — *.class ≡ .class, *#id ≡ #id, etc.
+                    if (prev_was_universal) {
+                        // Remove the previously emitted '*'
+                        out.pop_back();
+                        prev_was_universal = false;
+                    }
+                    if (part.type == CSSRule::SelectorPart::Type::CLASS) {
+                        out += '.';
+                        out += part.value;
+                    } else if (part.type == CSSRule::SelectorPart::Type::ID) {
+                        out += '#';
+                        out += part.value;
+                    } else if (part.type == CSSRule::SelectorPart::Type::ATTR) {
+                        out += '[';
+                        out += part.value;
+                        out += ']';
+                    } else { // PSEUDO
+                        out += ':';
+                        out += part.value;
+                    }
                     break;
                 case CSSRule::SelectorPart::Type::COMBINATOR:
-                    out += part.value;  // includes space for descendant combinator
+                    // Combinator resets universal-tracking; * > .class ≠ > .class
+                    if (prev_was_universal) prev_was_universal = false;
+                    out += part.value;
                     break;
                 case CSSRule::SelectorPart::Type::UNIVERSAL:
                     out += '*';
+                    prev_was_universal = true;
                     break;
                 }
             }
@@ -570,6 +585,17 @@ std::string tinyizer::minify_css_text(const std::string& css) {
     // Remove trailing whitespace
     while (!out.empty() && (out.back() == ' ' || out.back() == '\t' || out.back() == '\n'))
         out.pop_back();
+
+    // Remove redundant universal selectors: *.class -> .class, *#id -> #id
+    // Safe because strings and comments have already been handled above.
+    // The universal selector * preceding a more specific selector is always redundant.
+    for (size_t i = 0; i + 1 < out.size(); i++) {
+        if (out[i] == '*' && (out[i + 1] == '.' || out[i + 1] == '#' ||
+                               out[i + 1] == '[' || out[i + 1] == ':')) {
+            out.erase(i, 1);
+            i--;  // recheck this position
+        }
+    }
 
     return out;
 }
