@@ -96,7 +96,7 @@ These minify only one language. The numbers shown are **CSS-only or JS-only** â€
 
 *Full-page comparison = combining these tools with an HTML minifier (see Pipeline above).*
 
-*All benchmarks are run via CI on every push. See [`benchmarks/`](benchmarks/).*
+*All benchmarks are run via CI on every push. See [`benchmarks/`](benchmarks/). Live charts and history at the **[benchmark dashboard](https://almatamagotchi.github.io/benchmark-dashboard/)**.*
 
 ## License
 
