@@ -76,13 +76,13 @@ These tools produce a complete, browser-ready HTML page — CSS, JS, and structu
 | Tool | test_page.html | test_page2.html | test_page3.html |
 |------|:---:|:---:|:---:|
 | **tinyizer** | **686** | **206** | **136** |
-| Pipeline¹ | 839 | 291 | 251 |
+| Pipeline¹ | 841 | 292 | 253 |
 | html-minifier-terser | 1,178 | 370 | 276 |
 | cminify | 1,263 | 433 | 328 |
 
 ¹ Lightning CSS (CSS) + Google Closure Compiler ADVANCED (JS) + html-minifier-terser (HTML). Best-of-breed combo for each language.
 
-**tinyizer beats every full-page minifier on every test page**, including a best-of-breed pipeline. The margin continues to grow — now ~18% smaller than the best competitor pipeline.
+**tinyizer beats every full-page minifier on every test page**, including a best-of-breed pipeline — now ~18% smaller than the best competitor pipeline.
 
 ### Per-language tools (for reference)
 
@@ -92,7 +92,7 @@ These minify only one language. The numbers shown are **CSS-only or JS-only** �
 |------|:-----:|:---:|:---:|:---:|
 | Google Closure Compiler | JS only | 94 | 28 | 45 |
 | Terser | JS only | 230 | 108 | 71 |
-| Lightning CSS | CSS only | 343 | 143 | 115 |
+| Lightning CSS | CSS only | 342 | 142 | 114 |
 
 *Full-page comparison = combining these tools with an HTML minifier (see Pipeline above).*
 
