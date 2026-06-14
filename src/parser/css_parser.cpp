@@ -189,23 +189,48 @@ bool CSSParser::parse_at_rule(CSSRule& rule, std::string_view at_name) {
         bool store_raw = NESTED_AT_RULES.count(at_name) > 0;
 
         if (store_raw) {
-            // Capture the full body text: prelude + `{...}`.
-            // We already consumed the opening `{`.  Walk back to include it
-            // in the raw body along with the prelude.
-            // body covers everything from the first char after the at-name
-            // to the matching `}`.
+            // Store the raw body text for backward-compat with passes that
+            // still operate on raw text (e.g., minify_css_text, rename_in_at_rules).
+            // Also parse the body into structured sub-rules so the serializer
+            // and recursive passes can traverse them.
+
             size_t body_start = prelude_start;
-            // We're currently past the opening `{`.
-            // Walk forward from here through the body content.
             int depth = 1;
             while (!tok_->eof() && depth > 0) {
                 char c = tok_->advance();
                 if (c == '{') depth++;
                 else if (c == '}') depth--;
             }
-            size_t body_end = tok_->pos();  // one past the closing `}`
+            size_t body_end = tok_->pos();
             std::string_view raw_body = tok_->substr(body_start, body_end);
             rule.set_raw_body(std::string(raw_body));
+
+            // Also parse the body content as structured sub-rules
+            size_t body_content_start = prelude_start;
+            // Find first '{' in the raw body
+            const char* raw_data = raw_body.data();
+            size_t raw_len = raw_body.size();
+            size_t open_brace = 0;
+            while (open_brace < raw_len && raw_data[open_brace] != '{') open_brace++;
+            if (open_brace < raw_len) {
+                std::string_view body_text(raw_data + open_brace + 1, raw_len - open_brace - 2);  // exclude {}
+                // Trim whitespace
+                while (!body_text.empty() && (body_text[0] == ' ' || body_text[0] == '\t' ||
+                       body_text[0] == '\r' || body_text[0] == '\n'))
+                    body_text.remove_prefix(1);
+                while (!body_text.empty() && (body_text.back() == ' ' || body_text.back() == '\t' ||
+                       body_text.back() == '\r' || body_text.back() == '\n'))
+                    body_text.remove_suffix(1);
+
+                if (!body_text.empty()) {
+                    CSSParser sub_parser(pool_);
+                    auto nested = sub_parser.parse(body_text);
+                    if (!nested.empty()) {
+                        rule.set_nested_rules(std::move(nested));
+                    }
+                }
+            }
+
             return true;
         }
 

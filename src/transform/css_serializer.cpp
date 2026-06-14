@@ -84,6 +84,24 @@ std::string serialize_css(const std::vector<CSSRule>& rules) {
         if (rule.is_at_rule()) {
             out += '@';
             out += rule.at_rule_name();
+
+            // Prefer structured nested rules over raw body when both available
+            if (rule.has_nested_rules()) {
+                out += ' ';
+                bool first_sel = true;
+                for (const auto& sel : rule.selectors()) {
+                    if (!first_sel) out += ',';
+                    first_sel = false;
+                    for (const auto& part : sel) {
+                        out += part.value;
+                    }
+                }
+                out += '{';
+                out += serialize_css(rule.nested_rules());
+                out += '}';
+                continue;
+            }
+
             if (rule.has_raw_body()) {
                 // Apply text-level CSS minification to the raw body.
                 // minify_css_text strips leading whitespace, which could eat

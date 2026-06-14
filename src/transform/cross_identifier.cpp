@@ -62,31 +62,39 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         });
     }
 
-    // ---- Collect from CSS ----
-    for (const auto& rule : doc.stylesheets()) {
-        // Classes
-        for (auto cls : rule.referenced_classes()) {
-            if (!cls.empty()) {
-                freq_map.record(cls);
-                doc_html_css_names.insert(cls);
+    // ---- Collect from CSS (recursive into nested at-rule bodies) ----
+    std::function<void(const std::vector<CSSRule>&)> collect_from_css;
+    collect_from_css = [&](const std::vector<CSSRule>& rules) {
+        for (const auto& rule : rules) {
+            // Classes
+            for (auto cls : rule.referenced_classes()) {
+                if (!cls.empty()) {
+                    freq_map.record(cls);
+                    doc_html_css_names.insert(cls);
+                }
+            }
+            // IDs
+            for (auto id : rule.referenced_ids()) {
+                if (!id.empty()) {
+                    freq_map.record(id);
+                    doc_html_css_names.insert(id);
+                }
+            }
+            // Custom properties
+            for (const auto& decl : rule.declarations()) {
+                if (decl.property.size() >= 2 &&
+                    decl.property[0] == '-' && decl.property[1] == '-') {
+                    freq_map.record(decl.property);
+                    doc_html_css_names.insert(decl.property);
+                }
+            }
+            // Recurse into nested at-rule bodies
+            if (rule.has_nested_rules()) {
+                collect_from_css(rule.nested_rules());
             }
         }
-        // IDs
-        for (auto id : rule.referenced_ids()) {
-            if (!id.empty()) {
-                freq_map.record(id);
-                doc_html_css_names.insert(id);
-            }
-        }
-        // Custom properties
-        for (const auto& decl : rule.declarations()) {
-            if (decl.property.size() >= 2 &&
-                decl.property[0] == '-' && decl.property[1] == '-') {
-                freq_map.record(decl.property);
-                doc_html_css_names.insert(decl.property);
-            }
-        }
-    }
+    };
+    collect_from_css(doc.stylesheets());
 
     // ---- Collect from JS ----
     // all_declared_names() is recursive, so calling it on root collects
@@ -182,8 +190,10 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     doc.css_rename_map = rename_map;
     doc.js_rename_map = rename_map;  // same names used across all languages
 
-    // ---- Apply renames to CSS rules ----
-    for (auto& rule : doc.stylesheets()) {
+    // ---- Apply renames to CSS rules (recursive into nested at-rule bodies) ----
+    std::function<void(std::vector<CSSRule>&)> apply_renames_to_css;
+    apply_renames_to_css = [&](std::vector<CSSRule>& rules) {
+    for (auto& rule : rules) {
         for (auto& sel : rule.selectors()) {
             for (auto& part : const_cast<std::vector<CSSRule::SelectorPart>&>(sel)) {
                 if (part.type == CSSRule::SelectorPart::Type::CLASS ||
@@ -200,9 +210,6 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
             const auto& prop = decl.property;
             // Custom property: preserve -- prefix when renaming
             if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
-                // Save original property name before renaming
-                std::string_view orig_prop = prop;
-
                 auto it = rename_map.find(prop);
                 if (it != rename_map.end()) {
                     std::string renamed = "--" + it->second;
@@ -216,7 +223,6 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
             }
 
             // Rename var(--name) references in ALL declaration values.
-            // Match against the ORIGINAL custom property names from rename_map.
             if (rename_map.empty()) continue;
             std::string_view val = decl.value;
             if (val.find("var(--") == std::string_view::npos) continue;
@@ -265,7 +271,13 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                 decl.value = doc.string_pool().intern(new_val);
             }
         }
+        // Recurse into nested at-rule bodies
+        if (rule.has_nested_rules()) {
+            apply_renames_to_css(rule.nested_rules());
+        }
     }
+    };
+    apply_renames_to_css(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     // ---- Apply renames to HTML DOM ----
     if (doc.root()) {
