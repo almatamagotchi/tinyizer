@@ -2269,7 +2269,42 @@ static size_t strip_side_effect_free_commas(std::string& js) {
 
         // Boolean/null/undefined
         std::string_view tok(js.data() + start, end - start);
-        return tok == "true" || tok == "false" || tok == "null" || tok == "undefined";
+        if (tok == "true" || tok == "false" || tok == "null" || tok == "undefined")
+            return true;
+
+        // typeof <identifier> — always side-effect-free (typeof doesn't evaluate)
+        if (tok.size() >= 7 && tok.substr(0, 6) == "typeof") {
+            size_t i = 6;
+            while (i < tok.size() && (tok[i] == ' ' || tok[i] == '\t')) i++;
+            // Check remaining chars are a valid identifier
+            if (i < tok.size() &&
+                (std::isalpha(tok[i]) || tok[i] == '_' || tok[i] == '$')) {
+                bool valid = true;
+                for (size_t j = i + 1; j < tok.size(); j++) {
+                    if (!std::isalnum(tok[j]) && tok[j] != '_' && tok[j] != '$') {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (valid) return true;
+            }
+        }
+
+        // void <literal> — void is pure when operand has no side effects
+        if (tok.size() >= 5 && tok.substr(0, 4) == "void") {
+            size_t i = 4;
+            while (i < tok.size() && (tok[i] == ' ' || tok[i] == '\t')) i++;
+            if (i < tok.size()) {
+                std::string_view operand = tok.substr(i);
+                if (operand == "0" || operand == "null" || operand == "undefined" ||
+                    operand == "true" || operand == "false" ||
+                    (std::isdigit(operand[0]) && std::all_of(operand.begin(), operand.end(),
+                        [](char c) { return std::isdigit(c) || c == '.'; })))
+                    return true;
+            }
+        }
+
+        return false;
     };
 
     size_t pos = 0;
