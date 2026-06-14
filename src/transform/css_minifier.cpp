@@ -315,4 +315,65 @@ bool Optimizer::pass_css_remove_unused_custom_props(UnifiedDocument& doc) {
     return changed;
 }
 
+// Apply CSS class/ID renames to at-rule raw bodies.
+// After cross_identifier renames selectors in top-level CSS rules, the same
+// class/ID names inside @media, @supports, etc. are left unchanged because
+// those bodies are opaque raw text.  This pass fixes that by applying the
+// rename_map as text replacements inside raw_body strings.
+bool Optimizer::pass_css_rename_in_at_rules(UnifiedDocument& doc) {
+    const auto& rm = doc.css_rename_map;
+    if (rm.empty()) return false;
+
+    bool changed = false;
+
+    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+        if (!rule.has_raw_body()) continue;
+        if (!rule.is_at_rule()) continue;
+
+        std::string body = rule.raw_body();
+        std::string new_body;
+        new_body.reserve(body.size());
+
+        size_t i = 0;
+        while (i < body.size()) {
+            char c = body[i];
+            // Check for class selector (.name) or ID selector (#name)
+            if ((c == '.' || c == '#') && i + 1 < body.size()) {
+                // Extract the name that follows
+                size_t name_start = i + 1;
+                size_t name_end = name_start;
+                while (name_end < body.size()) {
+                    char nc = body[name_end];
+                    if ((nc >= 'a' && nc <= 'z') || (nc >= 'A' && nc <= 'Z') ||
+                        (nc >= '0' && nc <= '9') || nc == '-' || nc == '_') {
+                        name_end++;
+                    } else {
+                        break;
+                    }
+                }
+
+                if (name_end > name_start) {
+                    std::string_view name(body.data() + name_start, name_end - name_start);
+                    auto it = rm.find(name);
+                    if (it != rm.end()) {
+                        new_body += c;  // keep '.' or '#'
+                        new_body += it->second;  // short name
+                        i = name_end;
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            new_body += c;
+            i++;
+        }
+
+        if (changed) {
+            rule.set_raw_body(std::move(new_body));
+        }
+    }
+
+    return changed;
+}
+
 } // namespace tinyizer

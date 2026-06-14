@@ -65,6 +65,7 @@ private:
     bool pass_css_default_strip(UnifiedDocument& doc);
     bool pass_css_dedup_rules(UnifiedDocument& doc);
     bool pass_css_remove_unused_custom_props(UnifiedDocument& doc);
+    bool pass_css_rename_in_at_rules(UnifiedDocument& doc);
     bool pass_js_constant_fold(UnifiedDocument& doc);
     bool pass_brotli_reorder(UnifiedDocument& doc);
     bool pass_obfuscation(UnifiedDocument& doc);
