@@ -1461,17 +1461,26 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
             if (prop_map.find("font") == prop_map.end()) {
                 std::string sh_value;
 
-                // Optional: font-style
+                // Optional: font-style (omit when default: normal)
                 auto it = prop_map.find("font-style");
-                if (it != prop_map.end()) { sh_value += std::string(decls[it->second].value) + ' '; }
+                if (it != prop_map.end()) {
+                    auto val = decls[it->second].value;
+                    if (val != "normal") { sh_value += std::string(val) + ' '; }
+                }
 
-                // Optional: font-variant
+                // Optional: font-variant (omit when default: normal)
                 it = prop_map.find("font-variant");
-                if (it != prop_map.end()) { sh_value += std::string(decls[it->second].value) + ' '; }
+                if (it != prop_map.end()) {
+                    auto val = decls[it->second].value;
+                    if (val != "normal") { sh_value += std::string(val) + ' '; }
+                }
 
-                // Optional: font-weight
+                // Optional: font-weight (omit when default: normal or 400)
                 it = prop_map.find("font-weight");
-                if (it != prop_map.end()) { sh_value += std::string(decls[it->second].value) + ' '; }
+                if (it != prop_map.end()) {
+                    auto val = decls[it->second].value;
+                    if (val != "normal" && val != "400") { sh_value += std::string(val) + ' '; }
+                }
 
                 // Required: font-size
                 sh_value += std::string(decls[sz_it->second].value);
