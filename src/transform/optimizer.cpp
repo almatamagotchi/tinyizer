@@ -2222,6 +2222,94 @@ static size_t strip_empty_functions(std::string& js) {
     return removed;
 }
 
+// ---- Fold side-effect-free expressions in comma chains ----
+// In comma expressions (a, b, c), remove operands that have no
+// observable side effects when their result is discarded.
+// Only handles literals (numbers, strings, booleans, null, undefined).
+//
+// Example: (1, x) -> (x)
+//          (true, false, y) -> (y)
+static size_t strip_side_effect_free_commas(std::string& js) {
+    std::vector<std::pair<size_t, size_t>> string_ranges;
+    scan_string_ranges_in_text(js, string_ranges);
+
+    auto inside_string = [&](size_t pos) {
+        if (string_ranges.empty()) return false;
+        auto it = std::upper_bound(string_ranges.begin(), string_ranges.end(), pos,
+            [](size_t p, const auto& r) { return p < r.first; });
+        if (it == string_ranges.begin()) return false;
+        --it;
+        return pos >= it->first && pos < it->second;
+    };
+
+    auto is_literal = [&](size_t start, size_t end) -> bool {
+        if (start >= end) return false;
+        while (start < end && (js[start] == ' ' || js[start] == '\t' || js[start] == '\n'))
+            start++;
+        while (end > start && (js[end-1] == ' ' || js[end-1] == '\t' || js[end-1] == '\n'))
+            end--;
+        if (start >= end) return false;
+
+        // Numeric literal (decimal, hex, exponent)
+        if (std::isdigit(js[start]) || (js[start] == '.' && start+1 < end && std::isdigit(js[start+1]))) {
+            for (size_t i = start; i < end; i++) {
+                char c = js[i];
+                if (std::isdigit(c) || c == '.' || c == 'e' || c == 'E' ||
+                    c == '+' || c == '-' || c == 'x' || c == 'X' ||
+                    (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) continue;
+                return false;
+            }
+            return true;
+        }
+
+        // String literal
+        if (js[start] == '"' || js[start] == '\'' || js[start] == '`') {
+            return (end - start >= 2 && js[end-1] == js[start]);
+        }
+
+        // Boolean/null/undefined
+        std::string_view tok(js.data() + start, end - start);
+        return tok == "true" || tok == "false" || tok == "null" || tok == "undefined";
+    };
+
+    size_t pos = 0;
+    while (pos < js.size()) {
+        size_t comma = js.find(',', pos);
+        if (comma == std::string_view::npos) break;
+
+        if (inside_string(comma)) {
+            pos = comma + 1;
+            continue;
+        }
+
+        // Walk backward to find expression start
+        size_t expr_start = comma;
+        while (expr_start > 0) {
+            char c = js[expr_start - 1];
+            if (c == ' ' || c == '\t' || c == '\n') { expr_start--; continue; }
+            if (c == '(' || c == '{' || c == '[' || c == ';' || c == ',' ||
+                c == '?' || c == ':' || c == '|' || c == '&' ||
+                c == '!' || c == '=' || c == '>' || c == '<' ||
+                c == '+' || c == '-' || c == '*' || c == '/' || c == '%')
+                break;
+            expr_start--;
+        }
+
+        if (is_literal(expr_start, comma)) {
+            size_t remove_start = expr_start;
+            while (remove_start > 0 && (js[remove_start-1] == ' ' || js[remove_start-1] == '\t'))
+                remove_start--;
+
+            js.erase(remove_start, comma - remove_start + 1);
+            // Only fold one comma per call — the pass is re-run in a loop
+            return 1;
+        }
+        pos = comma + 1;
+    }
+
+    return 0;
+}
+
 // Replace all occurrences of old_name with new_name in js, but only outside
 // string literals (', ", `) and comments (//, /* */). This prevents
 // cross-identifier renames from corrupting string content like "total is ".
@@ -2771,6 +2859,8 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
         strip_else_after_jump(opt_js);
         // Strip functions that became empty after console call removal
         strip_empty_functions(opt_js);
+        // Strip side-effect-free literals from comma expressions
+        strip_side_effect_free_commas(opt_js);
         // Strip functions that became unreferenced after console stripping
         // (e.g., greet() only called via console.log(greet("World")))
         strip_unreferenced_functions(opt_js);
@@ -2921,6 +3011,7 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
                 // elimination passes — inlining and other passes can orphan
                 // functions that still look alive to the scope tree.
                 strip_empty_functions(opt_js);
+                strip_side_effect_free_commas(opt_js);
                 strip_unreferenced_functions(opt_js);
 
                 // Reset fresh_root for next round (clears stale scope data)
