@@ -1,5 +1,6 @@
 #include "optimizer.h"
 #include <algorithm>
+#include <functional>
 
 namespace tinyizer {
 
@@ -9,7 +10,9 @@ namespace tinyizer {
 bool Optimizer::pass_css_minify(UnifiedDocument& doc) {
     bool changed = false;
 
-    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+    std::function<void(std::vector<CSSRule>&)> minify_rules;
+    minify_rules = [&](std::vector<CSSRule>& rules) {
+    for (auto& rule : rules) {
         for (auto& decl : const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations())) {
             // Minify zero values: 0px -> 0, 0em -> 0, etc.
             std::string_view val = decl.value;
@@ -116,7 +119,13 @@ bool Optimizer::pass_css_minify(UnifiedDocument& doc) {
                 }
             }
         }
+        // Recurse into nested at-rule bodies
+        if (rule.has_nested_rules()) {
+            minify_rules(rule.nested_rules());
+        }
     }
+    };
+    minify_rules(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     return changed;
 }
@@ -153,27 +162,33 @@ bool Optimizer::pass_css_default_strip(UnifiedDocument& doc) {
 
     bool changed = false;
 
-    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
-        auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
+    std::function<void(std::vector<CSSRule>&)> strip_defaults;
+    strip_defaults = [&](std::vector<CSSRule>& rules) {
+        for (auto& rule : rules) {
+            auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
 
-        // Track which properties we strip — needed because the value comparison
-        // must use the post-minification value (e.g., "normal" → "400" for font-weight
-        // was already done by pass_css_minify before this pass runs).
-        std::vector<size_t> to_remove;
+            std::vector<size_t> to_remove;
 
-        for (size_t i = 0; i < decls.size(); i++) {
-            auto it = INITIAL_VALUES.find(decls[i].property);
-            if (it != INITIAL_VALUES.end() && decls[i].value == it->second) {
-                to_remove.push_back(i);
+            for (size_t i = 0; i < decls.size(); i++) {
+                auto it = INITIAL_VALUES.find(decls[i].property);
+                if (it != INITIAL_VALUES.end() && decls[i].value == it->second) {
+                    to_remove.push_back(i);
+                }
+            }
+
+            for (size_t j = to_remove.size(); j > 0; j--) {
+                decls.erase(decls.begin() + to_remove[j - 1]);
+                changed = true;
+            }
+
+            // Recurse into nested at-rule bodies
+            if (rule.has_nested_rules()) {
+                strip_defaults(rule.nested_rules());
             }
         }
+    };
 
-        // Remove in reverse order to preserve indices
-        for (size_t j = to_remove.size(); j > 0; j--) {
-            decls.erase(decls.begin() + to_remove[j - 1]);
-            changed = true;
-        }
-    }
+    strip_defaults(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     return changed;
 }
@@ -185,57 +200,59 @@ bool Optimizer::pass_css_default_strip(UnifiedDocument& doc) {
 // Example: .a{color:red;margin:0}.b{color:red;margin:0}
 //       → .a,.b{color:red;margin:0}
 bool Optimizer::pass_css_dedup_rules(UnifiedDocument& doc) {
-    auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
     bool changed = false;
 
-    for (size_t i = 0; i + 1 < rules.size(); ) {
-        CSSRule& left = rules[i];
-        CSSRule& right = rules[i + 1];
+    std::function<void(std::vector<CSSRule>&)> dedup_rules;
+    dedup_rules = [&](std::vector<CSSRule>& rules) {
+        for (size_t i = 0; i + 1 < rules.size(); ) {
+            CSSRule& left = rules[i];
+            CSSRule& right = rules[i + 1];
 
-        // Only merge non-at-rules
-        if (left.is_at_rule() || right.is_at_rule()) {
-            i++;
-            continue;
+            // Only merge non-at-rules at this level
+            if (left.is_at_rule() || right.is_at_rule()) {
+                i++;
+                continue;
+            }
+
+            const auto& da = left.declarations();
+            const auto& db = right.declarations();
+
+            if (da.size() != db.size()) {
+                i++;
+                continue;
+            }
+
+            bool identical = true;
+            for (size_t j = 0; j < da.size(); j++) {
+                if (da[j].property != db[j].property || da[j].value != db[j].value) {
+                    identical = false;
+                    break;
+                }
+            }
+
+            if (!identical) {
+                i++;
+                continue;
+            }
+
+            auto& left_selectors = const_cast<std::vector<std::vector<CSSRule::SelectorPart>>&>(left.selectors());
+            for (const auto& sel : right.selectors()) {
+                left_selectors.push_back(sel);
+            }
+
+            rules.erase(rules.begin() + i + 1);
+            changed = true;
         }
 
-        const auto& da = left.declarations();
-        const auto& db = right.declarations();
-
-        // Quick check: must have same number of declarations
-        if (da.size() != db.size()) {
-            i++;
-            continue;
-        }
-
-        // Compare declarations — order matters for rendering in some
-        // edge cases (e.g., same property appearing twice).  For
-        // minified CSS the order is deterministic, so a linear scan
-        // is sufficient.
-        bool identical = true;
-        for (size_t j = 0; j < da.size(); j++) {
-            if (da[j].property != db[j].property || da[j].value != db[j].value) {
-                identical = false;
-                break;
+        // Recurse into nested at-rule bodies
+        for (auto& rule : rules) {
+            if (rule.has_nested_rules()) {
+                dedup_rules(rule.nested_rules());
             }
         }
+    };
 
-        if (!identical) {
-            i++;
-            continue;
-        }
-
-        // Merge selectors from right into left
-        auto& left_selectors = const_cast<std::vector<std::vector<CSSRule::SelectorPart>>&>(left.selectors());
-        for (const auto& sel : right.selectors()) {
-            left_selectors.push_back(sel);
-        }
-
-        // Remove the right rule
-        rules.erase(rules.begin() + i + 1);
-        changed = true;
-        // Don't increment i — the new i+1 might also be identical
-    }
-
+    dedup_rules(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
     return changed;
 }
 
@@ -251,66 +268,69 @@ bool Optimizer::pass_css_remove_unused_custom_props(UnifiedDocument& doc) {
     // every rule for `var(--<name>` tokens.
     std::unordered_set<std::string_view> used_custom_props;
 
-    for (const auto& rule : doc.stylesheets()) {
-        for (const auto& decl : rule.declarations()) {
-            const auto& val = decl.value;
-            // Search for "var(--" in the value
-            for (size_t pos = 0; pos + 6 <= val.size(); ) {
-                auto found = val.find("var(--", pos);
-                if (found == std::string_view::npos) break;
+    std::function<void(const std::vector<CSSRule>&)> collect_refs;
+    collect_refs = [&](const std::vector<CSSRule>& rules) {
+        for (const auto& rule : rules) {
+            for (const auto& decl : rule.declarations()) {
+                const auto& val = decl.value;
+                for (size_t pos = 0; pos + 6 <= val.size(); ) {
+                    auto found = val.find("var(--", pos);
+                    if (found == std::string_view::npos) break;
 
-                // Extract the custom property name: starts after "var(--"
-                size_t name_start = found + 6;  // "var(--" = 6 chars
-                size_t name_end = name_start;
-                while (name_end < val.size()) {
-                    char c = val[name_end];
-                    // Valid custom property name chars: alphanumeric, hyphen, underscore
-                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '-' || c == '_') {
-                        name_end++;
-                    } else {
-                        break;
+                    size_t name_start = found + 6;
+                    size_t name_end = name_start;
+                    while (name_end < val.size()) {
+                        char c = val[name_end];
+                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9') || c == '-' || c == '_') {
+                            name_end++;
+                        } else { break; }
                     }
-                }
 
-                if (name_end > name_start) {
-                    used_custom_props.insert(val.substr(name_start, name_end - name_start));
+                    if (name_end > name_start) {
+                        used_custom_props.insert(val.substr(name_start, name_end - name_start));
+                    }
+                    pos = name_end;
                 }
-
-                pos = name_end;
+            }
+            if (rule.has_nested_rules()) {
+                collect_refs(rule.nested_rules());
             }
         }
-    }
+    };
+    collect_refs(doc.stylesheets());
 
-    if (used_custom_props.empty()) {
-        // No var() references at all — all custom props are unused.
-        // Still need to check: do we remove ALL --props or none?
-        // If no var() references exist, all custom props are dead.
-    }
+    if (used_custom_props.empty()) { /* no var() refs, all custom props dead */ }
 
     bool changed = false;
 
-    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
-        auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
+    std::function<void(std::vector<CSSRule>&)> remove_unused;
+    remove_unused = [&](std::vector<CSSRule>& rules) {
+        for (auto& rule : rules) {
+            auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
 
-        std::vector<size_t> to_remove;
-        for (size_t i = 0; i < decls.size(); i++) {
-            const auto& prop = decls[i].property;
-            if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
-                // Extract the name after "--"
-                std::string_view name = prop.substr(2);
-                if (used_custom_props.find(name) == used_custom_props.end()) {
-                    to_remove.push_back(i);
+            std::vector<size_t> to_remove;
+            for (size_t i = 0; i < decls.size(); i++) {
+                const auto& prop = decls[i].property;
+                if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
+                    std::string_view name = prop.substr(2);
+                    if (used_custom_props.find(name) == used_custom_props.end()) {
+                        to_remove.push_back(i);
+                    }
                 }
             }
-        }
 
-        // Remove in reverse order to preserve indices
-        for (size_t j = to_remove.size(); j > 0; j--) {
-            decls.erase(decls.begin() + to_remove[j - 1]);
-            changed = true;
+            for (size_t j = to_remove.size(); j > 0; j--) {
+                decls.erase(decls.begin() + to_remove[j - 1]);
+                changed = true;
+            }
+
+            if (rule.has_nested_rules()) {
+                remove_unused(rule.nested_rules());
+            }
         }
-    }
+    };
+    remove_unused(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     return changed;
 }

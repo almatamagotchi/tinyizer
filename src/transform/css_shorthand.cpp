@@ -1561,7 +1561,9 @@ bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
         "mask-border-width", "mask-border-outset",
     };
 
-    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+    std::function<void(std::vector<CSSRule>&)> fold_values;
+    fold_values = [&](std::vector<CSSRule>& rules) {
+    for (auto& rule : rules) {
         auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
         for (auto& decl : decls) {
             if (BOX_MODEL_PROPS.find(decl.property) == BOX_MODEL_PROPS.end()) continue;
@@ -1622,7 +1624,12 @@ bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
                 changed = true;
             }
         }
+        if (rule.has_nested_rules()) {
+            fold_values(rule.nested_rules());
+        }
     }
+    };
+    fold_values(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     return changed;
 }
@@ -1635,7 +1642,9 @@ bool Optimizer::pass_css_value_fold(UnifiedDocument& doc) {
 bool Optimizer::pass_css_math_fold(UnifiedDocument& doc) {
     bool changed = false;
 
-    for (auto& rule : const_cast<std::vector<CSSRule>&>(doc.stylesheets())) {
+    std::function<void(std::vector<CSSRule>&)> fold_math;
+    fold_math = [&](std::vector<CSSRule>& rules) {
+    for (auto& rule : rules) {
         auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
 
         for (auto& decl : decls) {
@@ -1830,7 +1839,12 @@ bool Optimizer::pass_css_math_fold(UnifiedDocument& doc) {
                 changed = true;
             }
         }
+        if (rule.has_nested_rules()) {
+            fold_math(rule.nested_rules());
+        }
     }
+    };
+    fold_math(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     return changed;
 }
