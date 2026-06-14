@@ -3,6 +3,7 @@
 #include "../parser/tokenizer.h"
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
@@ -928,7 +929,8 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
         {"font-variant-emoji", "font-variant"},
     };
 
-    auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
+    std::function<void(std::vector<CSSRule>&)> process_shorthand;
+    process_shorthand = [&](std::vector<CSSRule>& rules) {
     for (size_t rule_idx = 0; rule_idx < rules.size(); rule_idx++) {
         auto& rule = rules[rule_idx];
         auto& decls = const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations());
@@ -1528,7 +1530,13 @@ bool Optimizer::pass_css_shorthand(UnifiedDocument& doc) {
                 changed = true;
             }
         }
+        // Recurse into nested at-rule bodies (@media, @supports)
+        if (rules[rule_idx].has_nested_rules()) {
+            process_shorthand(rules[rule_idx].nested_rules());
+        }
     }
+    };
+    process_shorthand(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
 
     return changed;
 }

@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cstring>
+#include <functional>
 
 namespace tinyizer {
 
@@ -314,10 +315,13 @@ bool Optimizer::pass_dead_css(UnifiedDocument& doc) {
     auto& rules = const_cast<std::vector<CSSRule>&>(doc.stylesheets());
     size_t removed = 0;
 
-    size_t i = 0;
-    while (i < rules.size()) {
-        auto& rule = rules[i];
-        bool has_match = false;
+    std::function<size_t(std::vector<CSSRule>&)> process_rules;
+    process_rules = [&](std::vector<CSSRule>& rules) -> size_t {
+        size_t local_removed = 0;
+        size_t i = 0;
+        while (i < rules.size()) {
+            auto& rule = rules[i];
+            bool has_match = false;
 
         for (const auto& sel : rule.selectors()) {
             if (sel.empty()) continue;
@@ -355,15 +359,24 @@ bool Optimizer::pass_dead_css(UnifiedDocument& doc) {
 
         if (rule.is_at_rule()) {
             has_match = true;
+            // Process nested rules within this at-rule
+            if (rule.has_nested_rules()) {
+                size_t nested_removed = process_rules(rule.nested_rules());
+                local_removed += nested_removed;
+            }
         }
 
         if (!has_match) {
             rules.erase(rules.begin() + i);
-            removed++;
+            local_removed++;
         } else {
             i++;
         }
     }
+    return local_removed;
+    };
+
+    removed = process_rules(rules);
 
     if (removed > 0) {
         doc.set_total_minified_bytes(doc.total_minified_bytes() + removed * 10);
