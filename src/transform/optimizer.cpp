@@ -3172,6 +3172,8 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
                     static const std::vector<std::tuple<std::string_view, std::string_view, std::string_view>> default_attrs = {
                         {"input", "type", "text"},
                         {"script", "type", "text/javascript"},
+                        {"script", "type", "module"},
+                        {"style", "type", "text/css"},
                         {"form", "method", "get"},
                         {"button", "type", "submit"},
                         {"form", "enctype", "application/x-www-form-urlencoded"},
