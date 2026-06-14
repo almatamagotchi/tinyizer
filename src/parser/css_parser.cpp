@@ -336,8 +336,9 @@ CSSRule::SelectorPart CSSParser::parse_selector_part() {
         // Could be ::pseudo-element or :pseudo-class
         if (tok_->peek() == ':') tok_->advance();
         std::string_view pseudo = tok_->read_identifier();
-        // If pseudo has (), skip them
+        // If pseudo has (), capture the argument for the value
         if (tok_->peek() == '(') {
+            size_t paren_start = tok_->pos();
             int depth = 1;
             tok_->advance();
             while (!tok_->eof() && depth > 0) {
@@ -346,10 +347,15 @@ CSSRule::SelectorPart CSSParser::parse_selector_part() {
                 if (depth > 0) tok_->advance();
             }
             if (tok_->peek() == ')') tok_->advance();
+            size_t paren_end = tok_->pos();
+            std::string full_val(pseudo);
+            full_val += tok_->substr(paren_start, paren_end - paren_start);
+            part.type = CSSRule::SelectorPart::Type::PSEUDO;
+            part.value = pool_.intern(full_val);
+        } else {
+            part.type = CSSRule::SelectorPart::Type::PSEUDO;
+            part.value = pool_.intern(pseudo);
         }
-        part.type = CSSRule::SelectorPart::Type::PSEUDO;
-        part.value = pool_.intern(pseudo);
-    } else if (c == '[') {
         tok_->advance();
         std::string_view attr = tok_->read_identifier();
         // Skip rest of attribute selector: =, ~=, |=, ^=, $=, *=, value, ]

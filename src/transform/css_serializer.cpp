@@ -185,8 +185,31 @@ std::string serialize_css(const std::vector<CSSRule>& rules) {
                         out += part.value;
                         out += ']';
                     } else { // PSEUDO
-                        out += ':';
-                        out += part.value;
+                        // Simplify :is(X) to X when X is a single selector (no commas).
+                        // :is() specificity equals the most specific argument, so
+                        // unwrapping a single argument doesn't change specificity.
+                        std::string_view pv = part.value;
+                        if (pv.size() >= 4 && pv.substr(0, 3) == "is(") {
+                            // Check for commas at depth 1
+                            size_t depth = 0;
+                            bool has_comma = false;
+                            for (size_t k = 3; k < pv.size() && pv[k] != ')'; k++) {
+                                if (pv[k] == '(') depth++;
+                                else if (pv[k] == ')') depth--;
+                                else if (pv[k] == ',' && depth == 0) { has_comma = true; break; }
+                            }
+                            if (!has_comma) {
+                                // Emit only the inner selector: strip "is(" prefix and trailing ")"
+                                std::string_view inner = pv.substr(3, pv.size() - 4); // remove "is(" and ")"
+                                out += inner;
+                            } else {
+                                out += ':';
+                                out += pv;
+                            }
+                        } else {
+                            out += ':';
+                            out += pv;
+                        }
                     }
                     break;
                 case CSSRule::SelectorPart::Type::COMBINATOR:
@@ -612,6 +635,32 @@ std::string tinyizer::minify_css_text(const std::string& css) {
                                out[i + 1] == '[' || out[i + 1] == ':')) {
             out.erase(i, 1);
             i--;  // recheck this position
+        }
+    }
+
+    // Remove redundant :is() wrapper when wrapping a single simple selector.
+    // :is(.foo) -> .foo, :is(#bar) -> #bar, :is([attr]) -> [attr]
+    // Only when the argument contains no commas. :is() specificity equals
+    // the most specific argument, so unwrapping doesn't change specificity.
+    {
+        size_t pos = 0;
+        while ((pos = out.find(":is(", pos)) != std::string::npos) {
+            size_t arg_start = pos + 4;
+            int depth = 1;
+            size_t arg_end = arg_start;
+            bool has_comma = false;
+            while (arg_end < out.size() && depth > 0) {
+                char c = out[arg_end];
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                else if (c == ',' && depth == 1) has_comma = true;
+                if (depth > 0) arg_end++;
+            }
+            if (depth == 0 && !has_comma && arg_end > arg_start) {
+                out.replace(pos, arg_end - pos + 1, out.substr(arg_start, arg_end - arg_start));
+            } else {
+                pos = arg_end + 1;
+            }
         }
     }
 
