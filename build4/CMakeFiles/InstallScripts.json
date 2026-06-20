@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/alma/.nanobot/workspace/projects/tinyizer/build4/cmake_install.cmake",
-		"/home/alma/.nanobot/workspace/projects/tinyizer/build4/tests/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
