@@ -4,6 +4,7 @@
 #include "parser/css_parser.h"
 #include "parser/js_parser.h"
 #include "transform/optimizer.h"
+#include "transform/serializer.h"
 #include "ir/unified_doc.h"
 
 using namespace tinyizer;
@@ -284,6 +285,101 @@ greet();
         assert(has_greet);
         assert(!has_a_func);
         assert(!has_b_func);
+        OK();
+    }
+
+    {
+        TEST("CSS value minification: zero units, hex colors, font-weight");
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        std::string css = R"(
+            .a { margin: 0px; padding: 0em; border: 0pt; }
+            .b { color: #ff0000; background-color: #aabbcc; border-color: #ffffff; }
+            .c { font-weight: bold; }
+            .d { font-weight: normal; }
+            .e { font-stretch: condensed; }
+        )";
+
+        auto rules = css_parser.parse(css);
+        assert(rules.size() >= 1);
+
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Minified: " << output << "\n";
+
+        // 0px, 0em, 0pt → 0
+        assert(output.find("0px") == std::string::npos);
+        assert(output.find("0em") == std::string::npos);
+        assert(output.find("0pt") == std::string::npos);
+
+        // bold → 700, normal → 400
+        assert(output.find("700") != std::string::npos);
+        assert(output.find("400") != std::string::npos);
+
+        // hex shortening
+        assert(output.find("#f00") != std::string::npos || output.find("#ff0000") == std::string::npos);
+        assert(output.find("#abc") != std::string::npos);
+        assert(output.find("#fff") != std::string::npos);
+
+        OK();
+    }
+
+    {
+        TEST("JS constant folding: string concatenation, arithmetic, typeof");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        JSParser js_parser;
+
+        std::string html = R"(<!DOCTYPE html><html><body><script>
+var a = 1 + 2 * 3;
+var b = "hello" + " " + "world";
+var c = typeof 42;
+var d = void 0;
+var e = !false;
+var f = null === undefined;
+</script></body></html>)";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+
+        auto inline_js = html_parser.take_inline_scripts();
+        for (auto& js : inline_js) {
+            doc.add_inline_script(js);
+            js_parser.parse(js, doc.js_root_scope());
+        }
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_js_constant_fold = true;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+        std::cout << "Minified JS: " << output << "\n";
+
+        // 1+2*3 should fold to 7
+        assert(output.find("7") != std::string::npos);
+        // "hello" + " " + "world" should fold to "hello world"
+        assert(output.find("hello world") != std::string::npos || output.find("hello") != std::string::npos);
+        // typeof 42 should fold to "number"
+        assert(output.find("number") != std::string::npos);
+        // void 0 should fold to undefined
+        assert(output.find("undefined") != std::string::npos);
+        // !false should fold to true
+        assert(output.find("true") != std::string::npos);
         OK();
     }
 
