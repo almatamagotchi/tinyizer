@@ -558,6 +558,81 @@ var f = null === undefined;
         OK();
     }
 
+    {
+        TEST("CSS default property stripping: remove properties at their defaults");
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        std::string css = R"(
+            .a {
+                display: block;
+                font-style: normal;
+                font-variant: normal;
+                font-weight: normal;
+                text-decoration: none;
+                visibility: visible;
+                flex-direction: row;
+                justify-content: flex-start;
+                align-items: stretch;
+                list-style-type: disc;
+                background-repeat: repeat;
+                border-collapse: separate;
+                overflow: visible;
+                white-space: normal;
+                cursor: auto;
+                opacity: 1;
+                transform: none;
+                animation: none;
+            }
+            .b {
+                /* these override defaults — should survive */
+                display: flex;
+                font-style: italic;
+                font-weight: bold;
+                text-decoration: underline;
+                visibility: hidden;
+                flex-direction: column;
+                justify-content: center;
+                opacity: 0.5;
+            }
+        )";
+
+        auto rules = css_parser.parse(css);
+        assert(rules.size() >= 1);
+
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Default-stripped: " << output << "\n";
+        std::cout << "Original size: " << css.size() << " → " << output.size() << " bytes\n";
+
+        // Properties set to their defaults in .a should be stripped
+        bool has_font_style_normal = output.find("font-style:normal") != std::string::npos;
+        bool has_display_block = output.find("display:block") != std::string::npos;
+        std::cout << "font-style:normal stripped: " << (!has_font_style_normal ? "yes" : "no") << "\n";
+        std::cout << "display:block stripped: " << (!has_display_block ? "yes" : "no") << "\n";
+
+        // Overridden values in .b should survive
+        bool has_display_flex = output.find("display:flex") != std::string::npos;
+        bool has_font_style_italic = output.find("font-style:italic") != std::string::npos;
+        std::cout << "display:flex survived: " << (has_display_flex ? "yes" : "no") << "\n";
+        std::cout << "font-style:italic survived: " << (has_font_style_italic ? "yes" : "no") << "\n";
+
+        // Size should be significantly reduced
+        assert(output.size() < css.size() * 0.7);
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
