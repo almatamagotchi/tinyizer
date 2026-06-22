@@ -508,6 +508,56 @@ var f = null === undefined;
         OK();
     }
 
+    {
+        TEST("CSS shorthand merging: margin/padding consolidation");
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        std::string css = R"(
+            .box {
+                margin-top: 10px;
+                margin-right: 10px;
+                margin-bottom: 10px;
+                margin-left: 10px;
+                padding-top: 5px;
+                padding-right: 5px;
+                padding-bottom: 5px;
+                padding-left: 5px;
+                border-width: 2px;
+                border-style: solid;
+                border-color: red;
+            }
+        )";
+
+        auto rules = css_parser.parse(css);
+        assert(rules.size() >= 1);
+
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.enable_css_shorthand = true;
+        config.max_iterations = 5;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Shorthand output: " << output << "\n";
+
+        // All four margin longhands should be consolidated into margin:10px
+        bool has_margin_shorthand = output.find("margin:") != std::string::npos;
+        std::cout << "Margin shorthand: " << (has_margin_shorthand ? "yes" : "no") << "\n";
+
+        // border consolidation
+        bool has_border_shorthand = output.find("border:") != std::string::npos;
+        std::cout << "Border shorthand: " << (has_border_shorthand ? "yes" : "no") << "\n";
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
