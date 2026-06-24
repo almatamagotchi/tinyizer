@@ -436,5 +436,95 @@ before making changes.
 
 ---
 
+## standalone CSS serialization path
+
+### current pipeline (HTML→CSS→HTML)
+
+The optimizer currently requires an HTML document as input. The CSS
+serialization is embedded in the HTML workflow:
+
+```
+1. HTML parse        → extracts <style> content → doc.inline_styles_
+2. CSS parse         → css_parser.parse(raw_css) → CSSRule objects
+3. add_stylesheet()  → stores rules in doc.stylesheets_
+4. optimizer passes  → mutate doc.stylesheets_ in place
+5. serialize_css()   → doc.stylesheets_ → string
+6. HTML serialize    → embeds string into <style> tags (doc.optimized_css)
+```
+
+The CSS serializer itself (`serialize_css`, css_serializer.cpp line 78)
+is a free function that takes `const std::vector<CSSRule>&` and returns
+a minified CSS string. It does NOT depend on the HTML DOM or any other
+part of the pipeline. This means the serialization step is already
+standalone.
+
+### fork point
+
+A direct CSS→CSS path would fork at step 2, skipping the HTML
+parse/embed entirely:
+
+```
+standalone flow:
+  CSS parse  →  add_stylesheet()  →  optimize()  →  serialize_css()
+```
+
+The `optimize()` function (optimizer.cpp line 2746) currently requires
+a `UnifiedDocument` with an HTML DOM root. For standalone CSS, we'd
+need either:
+- A minimal `UnifiedDocument` with a dummy root (similar to what the
+  @keyframes test does)
+- An `optimize_css_only()` method that skips DOM-dependent passes
+
+### which passes work standalone
+
+These passes operate on `doc.stylesheets()` only and work without HTML:
+
+| pass | works? | notes |
+|------|--------|-------|
+| `pass_css_minify` | ✅ | value-level optimizations |
+| `pass_css_shorthand` | ✅ | merges multi-declaration patterns |
+| `pass_css_default_strip` | ✅ | removes default CSS values |
+| `pass_css_dedup_rules` | ✅ | merges identical CSS rules |
+| `pass_css_rename_in_at_rules` | ✅ | renames in `@keyframes` raw bodies |
+| `pass_cross_identifier` (CSS side) | ✅ | collects CSS names, builds rename_map |
+| `pass_css_shorthand_merge` | ✅ | shorthand property merging |
+| `pass_font_family_unquote` | ✅ | strips unnecessary font quotes |
+
+### which passes do NOT work standalone
+
+These passes require the HTML DOM for matching:
+
+| pass | why not |
+|------|---------|
+| `pass_dead_css` | matches CSS selectors against DOM elements |
+| `pass_cross_identifier` (HTML side) | renames class/id in HTML DOM |
+| `pass_remove_unused_custom_props` | checks JS for `var(--name)` references |
+| `pass_dead_js` | AST-based dead code, requires DOM context |
+
+### implementation notes
+
+The simplest approach for a `--css-only` CLI flag:
+
+1. Parse CSS with `CSSParser` (already exists)
+2. Create a minimal `UnifiedDocument` with a dummy root
+3. Call `add_stylesheet()` with the parsed rules
+4. Call `optimize()` with `enable_dead_css = false` and
+   `config.enable_html_minify = false`
+5. Return `serialize_css(doc.stylesheets())`
+
+The brotli reorder pass (brotli_reorder.cpp) already demonstrates that
+CSS can be serialized independently — it calls `serialize_css()` on
+the stylesheets regardless of the DOM.
+
+### current test pattern
+
+The @keyframes shortening test (test_full_pipeline.cpp line 490) already
+uses this standalone pattern: it parses CSS directly, adds it to a
+document with a dummy root, and calls `serialize_css(doc.stylesheets())`.
+The VPS landing page and oracle could also benefit from a direct
+CSS→CSS path.
+
+---
+
 *this document grows with the project. edit it when architectural
 decisions change or new subsystems are added.*
