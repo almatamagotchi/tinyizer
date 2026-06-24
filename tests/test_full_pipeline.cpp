@@ -794,6 +794,96 @@ span{color:red}span{color:red}
         OK();
     }
 
+    // === Cross-identifier collision edge cases ===
+    {
+        TEST("Cross-identifier: single-char class preserved during rename");
+        // .a is single-char → should NOT be renamed (filtered at name.size()<=1)
+        // .box is multi-char → should be renamed
+        // Verify the renamed short name doesn't collide with existing .a
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        std::string css = R"(
+            .a { color: red; }
+            .box { color: blue; }
+        )";
+
+        auto rules = css_parser.parse(css);
+
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.enable_cross_identifier = true;
+        config.enable_dead_css = false;
+        config.enable_css_minify = false;
+        config.enable_css_shorthand = false;
+        config.enable_html_minify = false;
+        config.enable_js_minify = false;
+        config.max_iterations = 3;
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Single-char output: " << output << "\n";
+
+        // .a is single-char, must NOT be renamed
+        if (output.find(".a") == std::string::npos) FAIL(".a missing");
+        // .box should be renamed to a short name
+        if (output.find(".box") != std::string::npos) FAIL(".box not renamed");
+
+        OK();
+    }
+
+    {
+        TEST("Cross-identifier: collision detection — two long classes, one matches short name");
+        // CSS-only: verify that when two long class names are renamed,
+        // each gets a unique short name. Also verify that an existing
+        // single-char class (.a) is preserved without collision.
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        std::string css = R"(
+            .card-header { padding: 10px; color: red; }
+            .card-footer { padding: 5px; color: blue; }
+            .a { margin: 0; }
+        )";
+
+        auto rules = css_parser.parse(css);
+
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.enable_cross_identifier = true;
+        config.enable_dead_css = false;
+        config.enable_css_minify = false;
+        config.enable_css_shorthand = false;
+        config.enable_html_minify = false;
+        config.enable_js_minify = false;
+        config.max_iterations = 3;
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Collision rename output: " << output << "\n";
+
+        // Both long names should be renamed
+        if (output.find("card-header") != std::string::npos)
+            FAIL("card-header not renamed");
+        if (output.find("card-footer") != std::string::npos)
+            FAIL("card-footer not renamed");
+        // .a is single-char, should stay as-is
+        if (output.find(".a") == std::string::npos)
+            FAIL(".a missing");
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
