@@ -88,6 +88,21 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                     doc_html_css_names.insert(decl.property);
                 }
             }
+            // @keyframes names (stored as ELEMENT-type selector parts in the prelude)
+            if (rule.is_at_rule()) {
+                auto an = rule.at_rule_name();
+                bool is_kf = (an == std::string_view("keyframes") ||
+                              an == std::string_view("-webkit-keyframes") ||
+                              an == std::string_view("-moz-keyframes") ||
+                              an == std::string_view("-o-keyframes"));
+                if (is_kf && rule.selectors().size() > 0 && rule.selectors()[0].size() > 0) {
+                    for (const auto& part : rule.selectors()[0]) {
+                        if (part.type == CSSRule::SelectorPart::Type::ELEMENT && !part.value.empty()) {
+                            freq_map.record_n(part.value, 2);  // weight 2: name used in @keyframes definition
+                        }
+                    }
+                }
+            }
             // Recurse into nested at-rule bodies
             if (rule.has_nested_rules()) {
                 collect_from_css(rule.nested_rules());
@@ -194,10 +209,23 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
     std::function<void(std::vector<CSSRule>&)> apply_renames_to_css;
     apply_renames_to_css = [&](std::vector<CSSRule>& rules) {
     for (auto& rule : rules) {
+        // Get at-rule info for @keyframes handling
+        auto an = rule.at_rule_name();
+        bool is_keyframes = (an == std::string_view("keyframes") ||
+                             an == std::string_view("-webkit-keyframes") ||
+                             an == std::string_view("-moz-keyframes") ||
+                             an == std::string_view("-o-keyframes"));
         for (auto& sel : rule.selectors()) {
-            for (auto& part : const_cast<std::vector<CSSRule::SelectorPart>&>(sel)) {
+            for (auto& part : sel) {
                 if (part.type == CSSRule::SelectorPart::Type::CLASS ||
                     part.type == CSSRule::SelectorPart::Type::ID) {
+                    auto it = rename_map.find(part.value);
+                    if (it != rename_map.end()) {
+                        part.value = doc.string_pool().intern(it->second);
+                    }
+                }
+                // @keyframes names are stored as ELEMENT type in the prelude
+                if (is_keyframes && part.type == CSSRule::SelectorPart::Type::ELEMENT) {
                     auto it = rename_map.find(part.value);
                     if (it != rename_map.end()) {
                         part.value = doc.string_pool().intern(it->second);
@@ -206,7 +234,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
             }
         }
         // Also rename custom properties in declarations
-        for (auto& decl : const_cast<std::vector<CSSRule::Declaration>&>(rule.declarations())) {
+        for (auto& decl : rule.declarations()) {
             const auto& prop = decl.property;
             // Custom property: preserve -- prefix when renaming
             if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
@@ -222,8 +250,52 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                 }
             }
 
+            // Rename animation/animation-name references to renamed @keyframes names
+            if (prop == std::string_view("animation") ||
+                prop == std::string_view("animation-name")) {
+                std::string_view v = decl.value;
+                // Walk through space-separated tokens in the value
+                std::string new_val;
+                size_t i = 0;
+                bool first = true;
+                while (i < v.size()) {
+                    // Skip whitespace
+                    while (i < v.size() && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n')) i++;
+                    if (i >= v.size()) break;
+
+                    size_t start = i;
+                    // Read token: identifier characters or number
+                    while (i < v.size() && (is_ident_char(v[i]) || v[i] == '.' || v[i] == '%')) i++;
+                    size_t end = i;
+
+                    std::string_view tok = v.substr(start, end - start);
+                    if (!first) new_val += ' ';
+                    first = false;
+
+                    // Skip known CSS animation keywords
+                    bool is_kw = (tok == "ease" || tok == "ease-in" || tok == "ease-out" ||
+                                  tok == "ease-in-out" || tok == "linear" || tok == "step-start" ||
+                                  tok == "step-end" || tok == "infinite" || tok == "alternate" ||
+                                  tok == "alternate-reverse" || tok == "normal" || tok == "reverse" ||
+                                  tok == "running" || tok == "paused" || tok == "both" ||
+                                  tok == "forwards" || tok == "backwards" || tok == "none");
+                    if (!is_kw) {
+                        auto it = rename_map.find(tok);
+                        if (it != rename_map.end()) {
+                            new_val += it->second;
+                            continue;
+                        }
+                    }
+                    new_val.append(tok.data(), tok.size());
+                }
+                if (!new_val.empty() && new_val != v) {
+                    decl.value = doc.string_pool().intern(new_val);
+                }
+            }
+
             // Rename var(--name) references in ALL declaration values.
             if (rename_map.empty()) continue;
+            {  // scope block for val
             std::string_view val = decl.value;
             if (val.find("var(--") == std::string_view::npos) continue;
 
@@ -270,6 +342,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                 new_val.append(val.data() + last_end, val.size() - last_end);
                 decl.value = doc.string_pool().intern(new_val);
             }
+            }  // end val scope block
         }
         // Recurse into nested at-rule bodies
         if (rule.has_nested_rules()) {
@@ -277,7 +350,7 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
         }
     }
     };
-    apply_renames_to_css(const_cast<std::vector<CSSRule>&>(doc.stylesheets()));
+    apply_renames_to_css(doc.stylesheets());
 
     // ---- Apply renames to HTML DOM ----
     if (doc.root()) {

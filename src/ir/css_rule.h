@@ -38,6 +38,7 @@ public:
     void add_selector_part(SelectorPart part) { selector_parts_.push_back(part); }
 
     const std::vector<std::vector<SelectorPart>>& selectors() const { return selectors_; }
+    std::vector<std::vector<SelectorPart>>& selectors() { return selectors_; }
     void add_selector(std::vector<SelectorPart> sel) {
         // Also populate legacy flat storage for backward compat
         for (const auto& p : sel) {
@@ -47,6 +48,7 @@ public:
     }
 
     const std::vector<Declaration>& declarations() const { return declarations_; }
+    std::vector<Declaration>& declarations() { return declarations_; }
     void add_declaration(Declaration decl) { declarations_.push_back(std::move(decl)); }
 
     bool is_at_rule() const { return is_at_rule_; }

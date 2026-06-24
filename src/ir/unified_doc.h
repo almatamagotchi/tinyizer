@@ -23,6 +23,7 @@ public:
     void set_root(std::unique_ptr<DOMNode> root) { root_ = std::move(root); }
 
     const std::vector<CSSRule>& stylesheets() const { return stylesheets_; }
+    std::vector<CSSRule>& stylesheets() { return stylesheets_; }
     void add_stylesheet(std::vector<CSSRule> rules) {
         for (auto& rule : rules) stylesheets_.push_back(std::move(rule));
     }

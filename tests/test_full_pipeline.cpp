@@ -490,22 +490,35 @@ var f = null === undefined;
 
         OptimizationConfig config;
         config.enable_cross_identifier = true;
+        config.enable_dead_css = false;
+        config.enable_css_minify = false;
+        config.enable_css_shorthand = false;
+        config.enable_html_minify = false;
+        config.enable_js_minify = false;
+        config.enable_dead_js = false;
+        config.enable_js_constant_fold = false;
+        config.enable_remove_unused_custom_props = false;
         config.max_iterations = 3;
 
         Optimizer optimizer(config);
         optimizer.optimize(doc);
 
         std::string output = serialize_css(doc.stylesheets());
-        std::cout << "Minified CSS: " << output << "\n";
 
-        // The long @keyframes name should be shortened
-        // and the animation reference should use the shortened name
-        assert(output.find("animation:") != std::string::npos);
-        assert(output.find("@keyframes") != std::string::npos);
-
-        // Original long name should not appear (may be shortened)
-        bool long_name_gone = output.find("slide-in-from-left") == std::string::npos;
-        std::cout << "Long name shortened: " << (long_name_gone ? "yes" : "no") << "\n";
+        // @keyframes should still be present
+        if (output.find("@keyframes") == std::string::npos)
+            FAIL("@keyframes missing from output");
+        // Animation reference should still be present
+        if (output.find("animation:") == std::string::npos)
+            FAIL("animation: missing from output");
+        // Long @keyframes names must be shortened
+        if (output.find("slide-in-from-left") != std::string::npos)
+            FAIL("slide-in-from-left not shortened");
+        if (output.find("fade-out") != std::string::npos)
+            FAIL("fade-out not shortened");
+        // Original class should be renamed too
+        if (output.find(".element") != std::string::npos)
+            FAIL("class .element not renamed");
 
         OK();
     }
