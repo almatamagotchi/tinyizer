@@ -687,6 +687,113 @@ var f = null === undefined;
         OK();
     }
 
+    // === Brotli reorder tests ===
+    {
+        TEST("Brotli reorder pass — does not break HTML output");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        CSSParser css_parser(pool);
+
+        std::string html = R"(<!DOCTYPE html>
+<html>
+<head>
+<style>.a{color:red}.b{color:red}.c{color:blue}.d{color:blue}</style>
+</head>
+<body>
+<div class="a">one</div><div class="b">two</div>
+<div class="c">three</div><div class="d">four</div>
+<p class="a b">five</p>
+</body>
+</html>)";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+        auto inline_css = html_parser.take_inline_styles();
+        if (!inline_css.empty()) {
+            auto rules = css_parser.parse(inline_css[0]);
+            if (!rules.empty()) doc.add_stylesheet(std::move(rules));
+        }
+
+        OptimizationConfig config;
+        config.max_iterations = 3;
+        config.enable_brotli_reorder = true;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+        std::string output = optimizer.serialize(doc);
+
+        std::cout << "Brotli reorder output: " << output.size() << " bytes";
+
+        if (output.empty()) FAIL("brotli reorder produced empty output");
+        if (output.find("one") == std::string::npos) FAIL("output missing body text");
+        if (output.find("color") == std::string::npos) FAIL("output missing CSS rules");
+
+        std::cout << " — valid\n";
+        OK();
+    }
+
+    {
+        TEST("Brotli reorder pass — size comparison with/without");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        CSSParser css_parser(pool);
+
+        std::string html = R"(<!DOCTYPE html>
+<html><head>
+<style>p{margin:0;padding:0}p{margin:0;padding:0}
+div{display:block}div{display:block}
+span{color:red}span{color:red}
+</style></head><body>
+<p>hello world this is a test page with repeated content</p>
+<p>hello world this is another test with repeated content</p>
+<p>hello world here is more repeated content</p>
+<p>hello world yet more repeated content here</p>
+<p>hello world fifth paragraph with repeated content</p>
+<p>hello world sixth paragraph with repeated content</p>
+</body></html>)";
+
+        // With brotli reorder
+        {
+            UnifiedDocument doc;
+            doc.set_root(html_parser.parse(html));
+            auto inline_css = html_parser.take_inline_styles();
+            if (!inline_css.empty()) {
+                auto rules = css_parser.parse(inline_css[0]);
+                if (!rules.empty()) doc.add_stylesheet(std::move(rules));
+            }
+            OptimizationConfig config;
+            config.max_iterations = 3;
+            config.enable_brotli_reorder = true;
+            Optimizer optimizer(config);
+            optimizer.optimize(doc);
+            std::string out = optimizer.serialize(doc);
+            std::cout << "  brotli-on:  " << out.size() << " bytes";
+            if (out.find("<p>") == std::string::npos) FAIL("brotli-on output missing <p>");
+        }
+
+        // Without brotli reorder
+        {
+            HTMLParser hp(pool);
+            UnifiedDocument doc;
+            doc.set_root(hp.parse(html));
+            auto inline_css = hp.take_inline_styles();
+            if (!inline_css.empty()) {
+                auto rules = css_parser.parse(inline_css[0]);
+                if (!rules.empty()) doc.add_stylesheet(std::move(rules));
+            }
+            OptimizationConfig config;
+            config.max_iterations = 3;
+            config.enable_brotli_reorder = false;
+            Optimizer optimizer(config);
+            optimizer.optimize(doc);
+            std::string out = optimizer.serialize(doc);
+            std::cout << "  brotli-off: " << out.size() << " bytes\n";
+            if (out.find("<p>") == std::string::npos) FAIL("brotli-off output missing <p>");
+        }
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
