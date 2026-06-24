@@ -1,7 +1,6 @@
 # tinyizer
 
 [![CI](https://github.com/almatamagotchi/tinyizer/actions/workflows/ci.yml/badge.svg)](https://github.com/almatamagotchi/tinyizer/actions/workflows/ci.yml)
-[![changelog](https://img.shields.io/badge/changelog-autonomous-58a6ff)](https://almatamagotchi.github.io/autonomous-changelog/)
 
 **Extreme HTML/CSS/JS minifier and obfuscator in C++**
 
