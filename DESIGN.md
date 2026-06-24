@@ -528,3 +528,100 @@ CSS→CSS path.
 
 *this document grows with the project. edit it when architectural
 decisions change or new subsystems are added.*
+
+---
+
+## JS obfuscation research
+
+### current state
+
+The `obfuscator.cpp` file has a framework with commented descriptions of five
+techniques (string encoding, control flow flattening, identifier mangling,
+dead code injection, self-defending) but the actual transformations are
+not implemented. `pass_obfuscation()` always returns `false`.
+
+The `cross_identifier` pass shares its `rename_map` with JS (`doc.js_rename_map`),
+but only renames identifiers that appear in CSS/HTML. JS-local variables are
+NOT renamed by any current pass.
+
+`js_minifier.cpp` comments mention local variable renaming but doesn't
+implement it — the `pass_js_minify()` function always returns `true` without
+modifying anything.
+
+### safe vs unsafe identifier mangling
+
+When renaming JS identifiers for obfuscation, the following patterns must
+be preserved to avoid breakage:
+
+**Safe to rename:**
+- `var|let|const` declared local variables within a function scope
+- Function parameter names
+- Block-scoped variables (`let`, `const` in `{}` blocks)
+- Function declarations (named functions)
+- Class names (within module scope)
+- Property access using dot notation where the property is a known key
+
+**Unsafe to rename — must detect and skip:**
+
+| pattern | why unsafe | detection |
+|---------|-----------|-----------|
+| `eval(str)` | string may contain variable refs | scan for `eval(` calls, mark all in-scope vars as unsafe |
+| `window[name]` / `globalThis[key]` | dynamic property access | detect computed property access on known global objects |
+| `obj[expr]` where expr is string | same as above | static analysis of bracket access expressions |
+| `new Function(str)` | creates code from string | same as `eval()` treatment |
+| `setTimeout(str)` | string is evaluated as code | mark as unsafe if first arg is string literal |
+| `Object.defineProperty()` | property names can be strings | conservative: mark the target object's properties unsafe |
+| `for...in` enumeration | code may iterate property names | mark the iteration scope's vars as unsafe |
+| Exported names (module) | other modules reference by name | detect `export { name }` / `export default` |
+| `toString()` / `toJSON()` | serialization depends on names | skip methods named `toString`, `toJSON`, `valueOf` |
+| `constructor` property | built-in reflection | never rename `constructor` |
+| `.call()` / `.apply()` usage | dynamic invocation | mark the called function as unsafe if `.call`/`.apply` used |
+| `arguments[i]` in the function | may be passed to dynamic access | detect `arguments` usage, mark the function's params unsafe |
+| Prototype method names | `Array.prototype.map` etc. | never rename built-in method names |
+
+### implementation strategy
+
+A two-pass approach similar to the CSS cross-identifier pass:
+
+**Pass 1 — SCOPE ANALYSIS:**
+- Parse JS into AST (existing `JSParser` in `src/parser/js_parser.cpp`)
+- Build scope tree (function scopes, block scopes)
+- For each scope, enumerate all declared identifiers
+- Mark unsafe identifiers per the detection rules above
+- Build `freq_map` of safe, renamable identifiers
+- Assign short names via `name_for_rank()`
+
+**Pass 2 — RENAME APPLICATION:**
+- Walk the AST and replace safe identifiers with short names
+- Update the `doc.js_rename_map` for cross-language consistency
+- Apply via string replacement on the optimized JS output
+
+### minimum viable prototype
+
+The simplest safe prototype would:
+1. Parse inline `<script>` tags via `JSParser`
+2. Walk scope tree, collect `var`/`let`/`const` declarations
+3. Filter out any identifiers that appear in `eval()` or bracket access
+4. Rename remaining safe identifiers to `a`, `b`, `c`...
+5. Apply renames to the serialized JS output
+
+This handles ~80% of obfuscation use cases: function-scoped variables
+in well-structured code. The `eval()` and dynamic access patterns are
+the critical safety checks.
+
+### interaction with cross-identifier pass
+
+The cross-identifier pass already renames identifiers shared between
+HTML, CSS, and JS (class names, IDs). JS-only obfuscation should:
+- Use a separate `freq_map` from the cross-language one
+- Generate short names that don't collide with cross-language renames
+- Run AFTER cross_identifier to avoid conflicts
+- Skip identifiers already renamed by cross-identifier
+
+### brotli reorder interaction
+
+Identifier mangling may reduce brotli compression effectiveness because
+similar variable names (`getUserProfile`, `getUserAvatar`) that share
+prefixes no longer share them after renaming (`a`, `b`). The brotli
+reorder pass should run BEFORE obfuscation, or obfuscation should be
+configurable separately from compression.
