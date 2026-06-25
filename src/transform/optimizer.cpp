@@ -3156,9 +3156,19 @@ std::string Optimizer::serialize(const UnifiedDocument& doc) const {
             // Skip the synthetic __root__ element
             bool is_root = (node.tag_name() == std::string_view("__root__"));
             // HTML5 optional start+end tags: <html>, <head>, <body>, </html>, </head>, </body>
-            bool is_implicit = (node.tag_name() == "html" ||
-                               node.tag_name() == "head" ||
-                               node.tag_name() == "body");
+            // Don't omit <html> if it has a lang attribute (accessibility regression)
+            bool html_has_lang = false;
+            if (node.tag_name() == "html") {
+                for (const auto& attr : node.attrs()) {
+                    if (attr.name == "lang" || attr.name == "xml:lang") {
+                        html_has_lang = true;
+                        break;
+                    }
+                }
+            }
+            bool is_implicit = (node.tag_name() == "head" ||
+                                node.tag_name() == "body" ||
+                                (node.tag_name() == "html" && !html_has_lang));
             // For style/script elements, use optimized content instead of text children
             bool is_style = (node.tag_name() == std::string_view("style"));
             bool is_script = (node.tag_name() == std::string_view("script"));
