@@ -2820,8 +2820,14 @@ bool Optimizer::optimize(UnifiedDocument& doc) {
     // For now, all inline stylesheets are merged — serialize the entire ruleset
     std::string all_css = serialize_css(doc.stylesheets());
     if (!all_css.empty()) {
-        // Assign to all inline style slots
-        for (size_t i = 0; i < doc.inline_styles().size(); i++) {
+        // Assign to all inline style slots. Count from stylesheets (which
+        // contains the parsed rules) rather than inline_styles (which may
+        // be empty if CSS was parsed externally and added to stylesheets
+        // without also populating inline_styles).
+        size_t n_styles = doc.stylesheets().empty() ? 0 : 1;
+        // Use max of stylesheets count and inline_styles count
+        if (doc.inline_styles().size() > n_styles) n_styles = doc.inline_styles().size();
+        for (size_t i = 0; i < n_styles; i++) {
             doc.optimized_css.push_back(all_css);
         }
     } else {
