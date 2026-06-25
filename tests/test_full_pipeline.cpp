@@ -884,6 +884,108 @@ span{color:red}span{color:red}
         OK();
     }
 
+    // === Vendor-prefixed @keyframes tests ===
+    {
+        TEST("@keyframes renaming with vendor prefixes — pass runs, output valid");
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        // Multi-name to trigger freq_map >= 2 threshold
+        std::string css = R"(
+            @keyframes slideIn {
+                0% { opacity: 0; }
+                100% { opacity: 1; }
+            }
+            @-webkit-keyframes slideIn {
+                0% { opacity: 0; }
+                100% { opacity: 1; }
+            }
+            @keyframes fadeOut {
+                0% { transform: scale(0); }
+                100% { transform: scale(1); }
+            }
+            .box { animation: slideIn 0.3s ease; -webkit-animation: slideIn 0.3s ease; }
+            .element { animation: fadeOut 0.5s ease; }
+        )";
+
+        auto rules = css_parser.parse(css);
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.enable_cross_identifier = true;
+        config.enable_css_minify = false;
+        config.enable_css_shorthand = false;
+        config.enable_html_minify = false;
+        config.enable_js_minify = false;
+        config.max_iterations = 3;
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Vendor prefix output: " << output << "\n";
+
+        // Vendor-prefixed @-webkit-keyframes should still be present
+        if (output.find("-webkit-keyframes") == std::string::npos)
+            FAIL("-webkit-keyframes missing from output");
+        // @keyframes should still be present
+        if (output.find("@keyframes") == std::string::npos)
+            FAIL("@keyframes missing from output");
+        // Long names should be renamed (if freq_map >= 2 threshold met)
+        // .box and .element should also be renamed
+        if (output.find(".box") != std::string::npos)
+            FAIL(".box not renamed");
+
+        OK();
+    }
+
+    {
+        TEST("@-moz-keyframes and @-o-keyframes — vendor prefixes preserved");
+        StringPool pool;
+        CSSParser css_parser(pool);
+
+        std::string css = R"(
+            @-moz-keyframes fade {
+                0% { opacity: 0; }
+                100% { opacity: 1; }
+            }
+            @-o-keyframes fade {
+                0% { opacity: 0; }
+                100% { opacity: 1; }
+            }
+            .fading { -moz-animation: fade 1s ease; -o-animation: fade 1s ease; }
+        )";
+
+        auto rules = css_parser.parse(css);
+        UnifiedDocument doc;
+        auto root = std::make_unique<DOMNode>(DOMNode::Type::ELEMENT, pool.intern("__root__"));
+        doc.set_root(std::move(root));
+        doc.add_stylesheet(std::move(rules));
+
+        OptimizationConfig config;
+        config.enable_cross_identifier = true;
+        config.enable_css_minify = false;
+        config.enable_css_shorthand = false;
+        config.enable_html_minify = false;
+        config.enable_js_minify = false;
+        config.max_iterations = 3;
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = serialize_css(doc.stylesheets());
+        std::cout << "Moz/O vendor output: " << output << "\n";
+
+        // Both vendor-prefixed at-rules should be preserved in output
+        if (output.find("-moz-keyframes") == std::string::npos)
+            FAIL("-moz-keyframes missing");
+        if (output.find("-o-keyframes") == std::string::npos)
+            FAIL("-o-keyframes missing");
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
