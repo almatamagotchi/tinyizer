@@ -80,14 +80,10 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                     doc_html_css_names.insert(id);
                 }
             }
-            // Custom properties
-            for (const auto& decl : rule.declarations()) {
-                if (decl.property.size() >= 2 &&
-                    decl.property[0] == '-' && decl.property[1] == '-') {
-                    freq_map.record(decl.property);
-                    doc_html_css_names.insert(decl.property);
-                }
-            }
+            // NOTE: CSS custom properties (--*) are NOT collected.
+            // They're globally scoped by name and referenced via var().
+            // Renaming them would break all var() references and JS
+            // style.setProperty() calls. See DESIGN.md §CSS variable protection.
             // @keyframes names (stored as ELEMENT-type selector parts in the prelude)
             if (rule.is_at_rule()) {
                 auto an = rule.at_rule_name();
@@ -234,20 +230,19 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
             }
         }
         // Also rename custom properties in declarations
+        // NOTE: CSS custom properties (--*) are NEVER renamed.
+        // They're globally scoped by name, referenced via var(), and can be
+        // set via JS el.style.setProperty('--name', val). Renaming them
+        // would break var() references and DOM inheritance.
         for (auto& decl : rule.declarations()) {
             const auto& prop = decl.property;
-            // Custom property: preserve -- prefix when renaming
+            // Skip custom properties entirely
             if (prop.size() >= 2 && prop[0] == '-' && prop[1] == '-') {
-                auto it = rename_map.find(prop);
-                if (it != rename_map.end()) {
-                    std::string renamed = "--" + it->second;
-                    decl.property = doc.string_pool().intern(renamed);
-                }
-            } else {
-                auto it = rename_map.find(decl.property);
-                if (it != rename_map.end()) {
-                    decl.property = doc.string_pool().intern(it->second);
-                }
+                continue;
+            }
+            auto it = rename_map.find(decl.property);
+            if (it != rename_map.end()) {
+                decl.property = doc.string_pool().intern(it->second);
             }
 
             // Rename animation/animation-name references to renamed @keyframes names
@@ -293,56 +288,8 @@ bool Optimizer::pass_cross_identifier(UnifiedDocument& doc) {
                 }
             }
 
-            // Rename var(--name) references in ALL declaration values.
-            if (rename_map.empty()) continue;
-            {  // scope block for val
-            std::string_view val = decl.value;
-            if (val.find("var(--") == std::string_view::npos) continue;
-
-            std::string new_val;
-            size_t last_end = 0;
-            bool found_rename = false;
-
-            for (size_t pos = 0; pos + 6 <= val.size(); ) {
-                auto found = val.find("var(--", pos);
-                if (found == std::string_view::npos) break;
-
-                new_val.append(val.data() + last_end, found - last_end);
-
-                size_t name_start = found + 6;
-                size_t name_end = name_start;
-                while (name_end < val.size()) {
-                    char c = val[name_end];
-                    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '-' || c == '_') {
-                        name_end++;
-                    } else {
-                        break;
-                    }
-                }
-
-                if (name_end > name_start) {
-                    std::string full_ref = "--" + std::string(val.data() + name_start, name_end - name_start);
-                    auto rit = rename_map.find(full_ref);
-                    if (rit != rename_map.end()) {
-                        new_val += "var(--" + rit->second;
-                        found_rename = true;
-                    } else {
-                        new_val.append(val.data() + found, name_end - found);
-                    }
-                } else {
-                    new_val.append(val.data() + found, name_end - found);
-                }
-
-                last_end = name_end;
-                pos = name_end;
-            }
-
-            if (found_rename) {
-                new_val.append(val.data() + last_end, val.size() - last_end);
-                decl.value = doc.string_pool().intern(new_val);
-            }
-            }  // end val scope block
+            // var(--name) references are NOT renamed — custom properties
+            // are globally scoped and never collected in the rename map.
         }
         // Recurse into nested at-rule bodies
         if (rule.has_nested_rules()) {
