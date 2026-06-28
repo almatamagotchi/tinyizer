@@ -1224,6 +1224,54 @@ document.addEventListener("DOMContentLoaded", function(){ init(); });
         OK();
     }
 
+    // === JS comma folding: modern syntax doesn't crash ===
+    {
+        TEST("JS comma folding: modern syntax doesn't crash the minifier");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        JSParser js_parser;
+
+        std::string html = "<!DOCTYPE html><html><body><div id=out></div><script>"
+            "var name='world';document.getElementById('out').innerHTML=`hello ${name} world`;"
+            "var obj={prop:{nested:1}};var y=obj?.prop?.nested;"
+            "var a=null??'default';"
+            "var d=(1,2,3);"
+            "for(var i=0,j=0;i<10;i++,j++){document.getElementById('out').innerHTML+=i;}"
+            "</script></body></html>";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+
+        auto inline_js = html_parser.take_inline_scripts();
+        for (auto& js : inline_js) {
+            doc.add_inline_script(js);
+            js_parser.parse(js, doc.js_root_scope());
+        }
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_js_minify = true;
+        config.enable_html_minify = true;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+
+        // The minifier should not crash or produce empty output on modern JS
+        if (output.empty())
+            FAIL("minifier produced empty output on modern JS");
+        // At minimum, the DOM-side-effect code must survive
+        if (output.find("hello") == std::string::npos)
+            FAIL("template literal with DOM side effect was stripped");
+        // The for-loop with DOM side effect must survive
+        if (output.find("for") == std::string::npos)
+            FAIL("for loop with DOM side effect was stripped");
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
