@@ -1066,6 +1066,164 @@ document.addEventListener("DOMContentLoaded", function(){ init(); });
         OK();
     }
 
+    // === Comment stripping edge cases ===
+    {
+        TEST("comment stripping: nested HTML comments");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+
+        std::string html = "<!DOCTYPE html><html><head><!--outer<!--inner-->still outer--></head><body><p>text</p></body></html>";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_html_minify = true;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+
+        // HTML comments should be stripped
+        if (output.find("<!--") != std::string::npos)
+            FAIL("HTML comment not stripped");
+        // Text content should survive
+        if (output.find("text") == std::string::npos)
+            FAIL("body text was stripped");
+
+        OK();
+    }
+
+    // === Attribute quote removal with edge cases ===
+    {
+        TEST("attribute quotes: special chars preserved");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+
+        std::string html = "<!DOCTYPE html><html><body>"
+            "<div class=simple id=no-spaces data-x=1></div>"
+            "<div class=\"special chars\" id=\"has=equals\"></div>"
+            "<img src=/img/photo.jpg alt=\"test image\">"
+            "<input type=text placeholder=\"Enter value\" value=\"\">"
+            "</body></html>";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_html_minify = true;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+
+        // Basic sanity: output should be non-empty HTML
+        if (output.empty())
+            FAIL("output is empty");
+        if (output.find("div") == std::string::npos)
+            FAIL("div elements were stripped");
+        // alt and placeholder with spaces must survive as attributes
+        if (output.find("alt") == std::string::npos)
+            FAIL("alt attribute was corrupted");
+        if (output.find("placeholder") == std::string::npos)
+            FAIL("placeholder attribute was corrupted");
+
+        OK();
+    }
+
+    // === CSS @supports and @container at-rules ===
+    {
+        TEST("CSS at-rules: @supports and @container survive minification");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        CSSParser css_parser(pool);
+
+        std::string html = "<!DOCTYPE html><html><head><style>"
+            "@supports (display: grid) { .grid { display: grid; grid-auto-flow: dense; } }"
+            "@supports not (display: grid) { .fallback { display: flex; } }"
+            "@container (min-width: 300px) { .card { font-size: 1.2em; } }"
+            "@container sidebar (min-width: 200px) { .sidebar-item { display: block; } }"
+            "</style></head><body><div class=grid><div class=card>test</div></div></body></html>";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+
+        auto inline_css = html_parser.take_inline_styles();
+        for (auto& css : inline_css) {
+            doc.add_inline_style(css);
+            auto rules = css_parser.parse(css);
+            doc.add_stylesheet(std::move(rules));
+        }
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_css_minify = true;
+        config.enable_css_shorthand = true;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+
+        // @supports and @container should survive minification
+        if (output.find("@supports") == std::string::npos)
+            FAIL("@supports at-rule was stripped");
+        if (output.find("@container") == std::string::npos)
+            FAIL("@container at-rule was stripped");
+        if (output.find("display:grid") == std::string::npos
+            && output.find("grid") == std::string::npos)
+            FAIL("CSS content inside @supports was stripped");
+
+        OK();
+    }
+
+    // === JS dead code elimination: DOM-side-effect functions survive ===
+    {
+        TEST("dead JS elimination: DOM-access functions survive");
+        StringPool pool;
+        HTMLParser html_parser(pool);
+        JSParser js_parser;
+
+        std::string html = "<!DOCTYPE html><html><body><div id=test></div>"
+            "<script>document.getElementById('test').innerHTML='hello';</script>"
+            "</body></html>";
+
+        UnifiedDocument doc;
+        doc.set_root(html_parser.parse(html));
+
+        auto inline_js = html_parser.take_inline_scripts();
+        for (auto& js : inline_js) {
+            doc.add_inline_script(js);
+            js_parser.parse(js, doc.js_root_scope());
+        }
+        doc.set_total_raw_bytes(html.size());
+
+        OptimizationConfig config;
+        config.enable_js_minify = true;
+        config.enable_html_minify = true;
+        config.max_iterations = 3;
+
+        Optimizer optimizer(config);
+        optimizer.optimize(doc);
+
+        std::string output = optimizer.serialize(doc);
+
+        // getElementById is a DOM-side-effect call — should survive
+        if (output.find("getElementById") == std::string::npos)
+            FAIL("DOM-side-effect JS was eliminated incorrectly");
+        if (output.find("hello") == std::string::npos)
+            FAIL("string literal in JS was stripped");
+
+        OK();
+    }
+
     std::cout << "\nAll pipeline tests passed!\n";
     return 0;
 }
