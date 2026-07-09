@@ -141,4 +141,4 @@ tinyizer --css-only styles.css -o styles.min.css
 
 ## license
 
-MIT
+Apache 2.0 + Commons Clause
